@@ -12,4 +12,5 @@ venv/
 .vscode/
 .idea/
 *.log
-*.json
+scraped_output.json
+.vercel
