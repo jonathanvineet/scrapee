@@ -1,4 +1,5 @@
 {
+  "root": "frontend",
   "buildCommand": "next build",
   "outputDirectory": ".next",
   "env": {
