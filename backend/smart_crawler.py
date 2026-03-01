@@ -104,8 +104,11 @@ class SmartCrawler:
 
             html = self.fetch_with_requests(current_url)
 
-            if self.needs_selenium(html):
-                html = self.fetch_with_selenium(current_url)
+            # Only upgrade to Selenium if it's available AND the page looks JS-rendered
+            if SELENIUM_AVAILABLE and self.needs_selenium(html):
+                selenium_html = self.fetch_with_selenium(current_url)
+                if selenium_html:  # only use if Selenium actually returned something
+                    html = selenium_html
 
             if not html:
                 continue

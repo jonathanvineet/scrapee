@@ -113,8 +113,11 @@ class UltraFastCrawler:
 
             html = self.fetch_requests(current_url)
 
-            if self.needs_selenium(html):
-                html = self.fetch_selenium(current_url)
+            # Only upgrade to Selenium if available AND page looks JS-rendered
+            if SELENIUM_AVAILABLE and self.needs_selenium(html):
+                selenium_html = self.fetch_selenium(current_url)
+                if selenium_html:
+                    html = selenium_html
 
             if html:
                 with self.lock:
