@@ -296,3 +296,67 @@ select.input {
     opacity: 0;
   }
 }
+
+/* Mode Option Cards */
+.mode-option {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.75rem;
+  border: 1px solid var(--fg-muted);
+  margin-bottom: 0.5rem;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.mode-option:hover {
+  border-color: var(--fg);
+  background: rgba(0, 255, 0, 0.03);
+}
+
+.mode-option--active {
+  border-color: var(--fg);
+  background: rgba(0, 255, 0, 0.06);
+}
+
+.mode-option-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.mode-option-label {
+  font-size: 0.95rem;
+  color: var(--fg);
+  letter-spacing: 0.05em;
+}
+
+.mode-option-desc {
+  font-size: 0.78rem;
+  color: var(--fg-muted);
+  line-height: 1.5;
+  padding-left: 1.4rem;
+}
+
+.mode-option--active .mode-option-desc {
+  color: #00cc00;
+}
+
+.mode-option-tags {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  padding-left: 1.4rem;
+}
+
+.mode-tag {
+  font-size: 0.68rem;
+  color: var(--bg);
+  background: var(--fg-muted);
+  padding: 0.1rem 0.4rem;
+  letter-spacing: 0.05em;
+}
+
+.mode-option--active .mode-tag {
+  background: var(--fg);
+}

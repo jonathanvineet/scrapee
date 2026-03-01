@@ -4,9 +4,24 @@ import { useState } from 'react';
 import LoadingSpinner from './LoadingSpinner';
 
 const MODES = [
-  { value: 'smart', label: 'GHOST_PROTOCOL' },
-  { value: 'pipeline', label: 'SWARM_ROUTINE' },
-  { value: 'fast', label: 'DEEP_RENDER' },
+  {
+    value: 'smart',
+    label: 'GHOST_PROTOCOL',
+    description: 'Tries lightweight HTTP requests first. If the page requires JavaScript rendering, automatically upgrades to a headless browser. Best balance of speed and compatibility.',
+    tags: ['adaptive', 'js-fallback', 'recommended'],
+  },
+  {
+    value: 'pipeline',
+    label: 'SWARM_ROUTINE',
+    description: 'Spawns 8 concurrent worker threads to crawl multiple pages simultaneously. Ideal for large sites where speed matters more than deep JS rendering.',
+    tags: ['threaded', 'concurrent', 'fast'],
+  },
+  {
+    value: 'fast',
+    label: 'DEEP_RENDER',
+    description: 'Runs every page through a full headless Chrome browser. Guarantees accurate results for heavily JavaScript-driven sites. Slower but most thorough.',
+    tags: ['selenium', 'headless-chrome', 'accurate'],
+  },
 ];
 
 export default function ScraperForm({ onSubmit, loading }) {
@@ -88,14 +103,20 @@ export default function ScraperForm({ onSubmit, loading }) {
           <span className="label">OP_MODE:</span>
           <div className="radio-group" style={{ flexDirection: 'column' }}>
             {MODES.map((m) => (
-              <label key={m.value} className="radio-label">
-                <input
-                  type="radio"
-                  value={m.value}
-                  checked={mode === m.value}
-                  onChange={(e) => setMode(e.target.value)}
-                />
-                [{m.value === mode ? '*' : ' '}] {m.label}
+              <label key={m.value} className={`radio-label mode-option${mode === m.value ? ' mode-option--active' : ''}`} onClick={() => setMode(m.value)}>
+                <div className="mode-option-header">
+                  <input
+                    type="radio"
+                    value={m.value}
+                    checked={mode === m.value}
+                    onChange={(e) => setMode(e.target.value)}
+                  />
+                  <span className="mode-option-label">[{m.value === mode ? '*' : ' '}] {m.label}</span>
+                </div>
+                <p className="mode-option-desc">{m.description}</p>
+                <div className="mode-option-tags">
+                  {m.tags.map(tag => <span key={tag} className="mode-tag">{tag}</span>)}
+                </div>
               </label>
             ))}
           </div>
