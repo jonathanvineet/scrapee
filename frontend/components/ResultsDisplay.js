@@ -1,66 +1,64 @@
 'use client';
 
 import { useState } from 'react';
-import { FiDownload, FiExternalLink, FiChevronDown, FiChevronUp } from 'react-icons/fi';
 
-function PageResult({ page, mode, index }) {
-  const [showLinks, setShowLinks] = useState(false);
-  const [showContent, setShowContent] = useState(false);
+// Generates an interactive JSON-like collapsible tree view for terminal UI
+function TreeViewer({ data }) {
+  const renderTree = (item, keyPref = '', indent = 0) => {
+    if (item === null || item === undefined) return null;
+
+    if (Array.isArray(item)) {
+      if (item.length === 0) return <span className="tree-string">[]</span>;
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column' }}>
+          {item.map((val, idx) => (
+            <div key={`${keyPref}-${idx}`} style={{ display: 'flex' }}>
+               <span className="tree-indent">{'  '.repeat(indent)}</span>
+               <span className="tree-key">[{idx}]: </span>
+               {typeof val === 'object' ? renderTree(val, `${keyPref}-${idx}`, indent + 1) : renderValue(val)}
+            </div>
+          ))}
+        </div>
+      );
+    } else if (typeof item === 'object') {
+      return (
+        <div style={{ display: 'flex', flexDirection: 'column' }}>
+          {Object.entries(item).map(([k, v]) => (
+            <div key={`${keyPref}-${k}`}>
+               <div style={{ display: 'flex' }}>
+                 <span className="tree-indent">{'  '.repeat(indent)}</span>
+                 <span className="tree-key">"{k}": </span>
+                 {typeof v === 'object' && v !== null ? (
+                   <span>{Array.isArray(v) ? '[...]' : '{...}'}</span>
+                 ) : (
+                   renderValue(v)
+                 )}
+               </div>
+               {typeof v === 'object' && v !== null && (
+                 renderTree(v, `${keyPref}-${k}`, indent + 1)
+               )}
+            </div>
+          ))}
+        </div>
+      );
+    }
+  };
+
+  const renderValue = (val) => {
+    if (typeof val === 'string') {
+      if (val.startsWith('http')) {
+        return <a href={val} target="_blank" rel="noopener noreferrer" className="tree-link">"{val}"</a>;
+      }
+      return <span className="tree-string">"{val}"</span>;
+    }
+    if (typeof val === 'number') return <span className="tree-number">{val}</span>;
+    if (typeof val === 'boolean') return <span className="tree-boolean">{val ? 'true' : 'false'}</span>;
+    return <span className="tree-string">"{String(val)}"</span>;
+  };
 
   return (
-    <div className="page-result">
-      <div className="page-result-header">
-        <span className="page-index">#{index + 1}</span>
-        <div className="page-title-group">
-          <h3>{page.title || 'Untitled Page'}</h3>
-          <a href={page.url} target="_blank" rel="noopener noreferrer" className="page-url">
-            {page.url} <FiExternalLink size={12} />
-          </a>
-        </div>
-        <span className="badge">{page.links_count} links</span>
-      </div>
-
-      {mode === 'detailed' && page.meta_description && (
-        <p className="meta-desc">{page.meta_description}</p>
-      )}
-
-      {mode === 'detailed' && page.headings && page.headings.length > 0 && (
-        <div className="section">
-          <button className="toggle-btn" onClick={() => setShowContent(!showContent)}>
-            {showContent ? <FiChevronUp /> : <FiChevronDown />}
-            Headings &amp; Content ({page.headings.length})
-          </button>
-          {showContent && (
-            <div className="content-list">
-              {page.headings.map((h, i) => (
-                <p key={i} className={`heading heading-${h.level}`}>{h.text}</p>
-              ))}
-              {page.paragraphs && page.paragraphs.map((p, i) => (
-                <p key={`p-${i}`} className="para">{p}</p>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      {page.links && page.links.length > 0 && (
-        <div className="section">
-          <button className="toggle-btn" onClick={() => setShowLinks(!showLinks)}>
-            {showLinks ? <FiChevronUp /> : <FiChevronDown />}
-            Links found ({page.links.length})
-          </button>
-          {showLinks && (
-            <div className="links-list">
-              {page.links.map((link, i) => (
-                <a key={i} href={link.url} target="_blank" rel="noopener noreferrer" className="link-item">
-                  <FiExternalLink size={12} />
-                  <span>{link.text || link.url}</span>
-                </a>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
+    <div style={{ padding: '10px', background: 'rgba(0,255,0,0.05)', border: '1px solid var(--fg-muted)', overflowX: 'auto' }}>
+       {renderTree(data, 'root')}
     </div>
   );
 }
@@ -69,16 +67,16 @@ export default function ResultsDisplay({ results }) {
   if (!results) {
     return (
       <div className="empty-state">
-        <p>No results yet. Start scraping to see results here.</p>
+         $ waiting for pipe... | _
       </div>
     );
   }
 
   if (results.error) {
     return (
-      <div className="error-box">
-        <h3>Error</h3>
-        <p>{results.error}</p>
+      <div className="results-container" style={{ color: 'var(--fg-error)' }}>
+        <p>[CRITICAL_FAILURE] - {results.error}</p>
+        <p>PROCESS ABORTED.</p>
       </div>
     );
   }
@@ -89,54 +87,21 @@ export default function ResultsDisplay({ results }) {
     const url = URL.createObjectURL(dataBlob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `scrapee-results-${Date.now()}.json`;
+    link.download = `payload-${Date.now()}.json`;
     link.click();
     URL.revokeObjectURL(url);
   };
 
   return (
     <div className="results-container">
-      <div className="results-header">
-        <h2>Scraping Results</h2>
-        <button onClick={handleDownload} className="btn btn-secondary">
-          <FiDownload /> Download JSON
-        </button>
+      <div style={{ marginBottom: '1rem', display: 'flex', justifyContent: 'space-between', borderBottom: '1px dashed var(--fg-muted)', paddingBottom: '0.5rem' }}>
+         <span>$ cat output.json</span>
+         <button onClick={handleDownload} className="btn-icon">
+            [ DOWNLOAD_FILE ]
+         </button>
       </div>
 
-      <div className="results-info">
-        <div className="info-item">
-          <span className="label">Status</span>
-          <span className="value status-ok">{results.status}</span>
-        </div>
-        <div className="info-item">
-          <span className="label">Mode</span>
-          <span className="value">{results.mode}</span>
-        </div>
-        <div className="info-item">
-          <span className="label">URLs Submitted</span>
-          <span className="value">{results.urls_processed}</span>
-        </div>
-        <div className="info-item">
-          <span className="label">Pages Scraped</span>
-          <span className="value">{results.pages_scraped ?? results.data?.length ?? 0}</span>
-        </div>
-        <div className="info-item">
-          <span className="label">Format</span>
-          <span className="value">{results.output_format}</span>
-        </div>
-      </div>
-
-      {results.data && results.data.length > 0 ? (
-        <div className="pages-list">
-          {results.data.map((page, i) => (
-            <PageResult key={i} page={page} mode={results.mode} index={i} />
-          ))}
-        </div>
-      ) : (
-        <div className="empty-state">
-          <p>No data was returned. The URL may be blocking scrapers or require authentication.</p>
-        </div>
-      )}
+      <TreeViewer data={results} />
     </div>
   );
 }

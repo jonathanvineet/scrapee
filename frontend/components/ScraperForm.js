@@ -1,24 +1,12 @@
 'use client';
 
 import { useState } from 'react';
-import { FiPlus, FiTrash2 } from 'react-icons/fi';
+import LoadingSpinner from './LoadingSpinner';
 
 const MODES = [
-  {
-    value: 'smart',
-    label: 'Smart Crawler',
-    description: 'Tries HTTP requests first, upgrades to Selenium for JS-heavy pages.',
-  },
-  {
-    value: 'pipeline',
-    label: 'Pipeline Crawler',
-    description: 'Threaded concurrent crawl (8 workers). Fastest for large sites.',
-  },
-  {
-    value: 'fast',
-    label: 'Selenium Crawler',
-    description: 'Full headless browser render on every page. Most accurate, requires Selenium.',
-  },
+  { value: 'smart', label: 'GHOST_PROTOCOL' },
+  { value: 'pipeline', label: 'SWARM_ROUTINE' },
+  { value: 'fast', label: 'DEEP_RENDER' },
 ];
 
 export default function ScraperForm({ onSubmit, loading }) {
@@ -35,14 +23,13 @@ export default function ScraperForm({ onSubmit, loading }) {
   };
 
   const addUrlField = () => setUrls([...urls, '']);
-
   const removeUrlField = (index) => setUrls(urls.filter((_, i) => i !== index));
 
   const validateUrls = () => {
     const newErrors = [];
     urls.forEach((url, index) => {
-      if (!url.trim()) newErrors[index] = 'URL is required';
-      else if (!url.match(/^https?:\/\/.+/)) newErrors[index] = 'Must start with http:// or https://';
+      if (!url.trim()) newErrors[index] = 'ERR_EMPTY_TARGET';
+      else if (!url.match(/^https?:\/\/.+/)) newErrors[index] = 'ERR_INVALID_PROTOCOL';
     });
     setErrors(newErrors);
     return newErrors.filter(Boolean).length === 0;
@@ -59,86 +46,94 @@ export default function ScraperForm({ onSubmit, loading }) {
     });
   };
 
+  if (loading) {
+    return <LoadingSpinner statusText="ESTABLISHING DIRECT UPLINK..." />;
+  }
+
   return (
     <div className="form-container">
-      <form onSubmit={handleSubmit} className="form">
+      <form onSubmit={handleSubmit} className="form-section">
 
         <div className="form-section">
-          <h2>URLs to Scrape</h2>
-          <div className="urls-list">
-            {urls.map((url, index) => (
-              <div key={index} className="url-input-group">
+          {urls.map((url, index) => (
+            <div key={index} style={{ marginBottom: '1rem' }}>
+              <div className="input-row">
+                <span>TARGET[{index}]:</span>
                 <input
                   type="url"
                   value={url}
                   onChange={(e) => handleUrlChange(index, e.target.value)}
-                  placeholder="https://example.com"
-                  className={`input ${errors[index] ? 'error' : ''}`}
+                  placeholder="https://ip..."
+                  className="input"
+                  style={{ borderBottomColor: errors[index] ? 'var(--fg-error)' : 'var(--fg-muted)' }}
                   disabled={loading}
                 />
                 {urls.length > 1 && (
-                  <button type="button" onClick={() => removeUrlField(index)} className="btn-icon" disabled={loading}>
-                    <FiTrash2 />
+                  <button type="button" onClick={() => removeUrlField(index)} className="btn-icon">
+                    [RM]
                   </button>
                 )}
               </div>
-            ))}
-          </div>
-          <button type="button" onClick={addUrlField} className="btn btn-secondary" disabled={loading}>
-            <FiPlus /> Add URL
+              {errors[index] && <div style={{ color: 'var(--fg-error)', fontSize: '0.8rem', marginTop: '0.2rem' }}>{errors[index]}</div>}
+            </div>
+          ))}
+          <button type="button" onClick={addUrlField} className="btn-icon" style={{ alignSelf: 'flex-start', color: 'var(--fg)' }}>
+            + APPEND_TARGET
           </button>
         </div>
 
+        <br />
+
         <div className="form-section">
-          <h3>Crawler Mode</h3>
-          <div className="mode-cards">
+          <span className="label">OP_MODE:</span>
+          <div className="radio-group" style={{ flexDirection: 'column' }}>
             {MODES.map((m) => (
-              <label key={m.value} className={`mode-card ${mode === m.value ? 'active' : ''}`}>
+              <label key={m.value} className="radio-label">
                 <input
                   type="radio"
                   value={m.value}
                   checked={mode === m.value}
                   onChange={(e) => setMode(e.target.value)}
-                  disabled={loading}
                 />
-                <div>
-                  <strong>{m.label}</strong>
-                  <p>{m.description}</p>
-                </div>
+                [{m.value === mode ? '*' : ' '}] {m.label}
               </label>
             ))}
           </div>
         </div>
 
+        <br />
+
         <div className="form-section">
-          <h3>Crawl Depth: <span className="depth-value">{maxDepth}</span></h3>
-          <input
-            type="range"
-            min={0}
-            max={3}
-            value={maxDepth}
-            onChange={(e) => setMaxDepth(Number(e.target.value))}
-            className="depth-slider"
-            disabled={loading}
-          />
-          <div className="depth-labels">
-            <span>0 (single page)</span>
-            <span>1 (+ linked pages)</span>
-            <span>2</span>
-            <span>3 (deep)</span>
+          <div className="input-row">
+            <span className="label">DEPTH:</span>
+            <input
+              type="number"
+              min={0}
+              max={3}
+              value={maxDepth}
+              onChange={(e) => setMaxDepth(Number(e.target.value))}
+              className="input"
+              style={{ width: '50px', textAlign: 'center' }}
+            />
           </div>
         </div>
 
+        <br />
+
         <div className="form-section">
-          <h3>Output Format</h3>
-          <select value={format} onChange={(e) => setFormat(e.target.value)} className="input" disabled={loading}>
-            <option value="json">JSON</option>
-            <option value="csv">CSV</option>
-          </select>
+          <div className="input-row">
+            <span className="label">FORMAT:</span>
+            <select value={format} onChange={(e) => setFormat(e.target.value)} className="input">
+              <option value="json">.JSON</option>
+              <option value="csv">.CSV</option>
+            </select>
+          </div>
         </div>
 
-        <button type="submit" className="btn btn-primary" disabled={loading}>
-          {loading ? '⏳ Scraping…' : '🕷️ Start Scraping'}
+        <br />
+
+        <button type="submit" className="btn">
+          ./EXECUTE_SCRAPER.sh <span className="blink">_</span>
         </button>
       </form>
     </div>

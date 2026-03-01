@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import ScraperForm from '@/components/ScraperForm';
 import ResultsDisplay from '@/components/ResultsDisplay';
 import History from '@/components/History';
@@ -10,6 +10,13 @@ export default function Home() {
   const [results, setResults] = useState(null);
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState('scraper');
+  const [timestamp, setTimestamp] = useState('');
+
+  useEffect(() => {
+    setInterval(() => {
+      setTimestamp(new Date().toISOString());
+    }, 1000);
+  }, []);
 
   const handleScrape = async (formData) => {
     setLoading(true);
@@ -23,7 +30,7 @@ export default function Home() {
       });
 
       if (!response.ok) {
-        throw new Error('Scraping failed');
+        throw new Error('SCRAPE_ERR_CONN_REFUSED');
       }
 
       const data = await response.json();
@@ -31,18 +38,21 @@ export default function Home() {
       setActiveTab('results');
     } catch (error) {
       setResults({
-        error: error.message || 'An error occurred',
+        error: error.message || 'FATAL_EXCEPTION_DURING_EXECUTION',
       });
     } finally {
-      setLoading(false);
+      setTimeout(() => setLoading(false), 500);
     }
   };
 
   return (
     <div className="container">
-      <header className="header">
-        <h1>🕷️ Scrapee</h1>
-        <p>Modern Web Scraper Interface</p>
+      <header>
+        <h1>root@scrapee:~#</h1>
+        <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--fg-muted)' }}>
+          <p>sys_ver: 2.4.0_beta</p>
+          <p>SYSTIME: {timestamp}</p>
+        </div>
       </header>
 
       <nav className="tabs">
@@ -50,23 +60,23 @@ export default function Home() {
           className={`tab ${activeTab === 'scraper' ? 'active' : ''}`}
           onClick={() => setActiveTab('scraper')}
         >
-          Scraper
+          [ EXEC ]
         </button>
         <button
           className={`tab ${activeTab === 'results' ? 'active' : ''}`}
           onClick={() => setActiveTab('results')}
         >
-          Results
+          [ DUMP ]
         </button>
         <button
           className={`tab ${activeTab === 'history' ? 'active' : ''}`}
           onClick={() => setActiveTab('history')}
         >
-          History
+          [ LOGS ]
         </button>
       </nav>
 
-      <main className="main">
+      <main className="main" style={{ flex: 1, overflowY: 'auto' }}>
         {activeTab === 'scraper' && (
           <ScraperForm onSubmit={handleScrape} loading={loading} />
         )}
@@ -77,6 +87,11 @@ export default function Home() {
           <History />
         )}
       </main>
+
+      <footer style={{ marginTop: 'auto', borderTop: '1px dashed var(--fg-muted)', paddingTop: '1rem', color: 'var(--fg-muted)', fontSize: '0.8rem', display: 'flex', justifyContent: 'space-between' }}>
+        <span>CONNECTION: SECURE</span>
+        <span>ENCRYPTION: AES-256</span>
+      </footer>
     </div>
   );
 }
