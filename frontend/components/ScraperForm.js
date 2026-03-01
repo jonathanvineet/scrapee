@@ -30,6 +30,7 @@ export default function ScraperForm({ onSubmit, loading }) {
   const [maxDepth, setMaxDepth] = useState(1);
   const [format, setFormat] = useState('json');
   const [errors, setErrors] = useState([]);
+  const [tooltip, setTooltip] = useState(null); // { mode, x, y }
 
   const handleUrlChange = (index, value) => {
     const newUrls = [...urls];
@@ -103,7 +104,15 @@ export default function ScraperForm({ onSubmit, loading }) {
           <span className="label">OP_MODE:</span>
           <div className="radio-group" style={{ flexDirection: 'column' }}>
             {MODES.map((m) => (
-              <div key={m.value} className="mode-option-wrapper">
+              <div
+                key={m.value}
+                className="mode-option-wrapper"
+                onMouseEnter={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setTooltip({ mode: m, x: rect.right + 10, y: rect.top + rect.height / 2 });
+                }}
+                onMouseLeave={() => setTooltip(null)}
+              >
                 <label className={`radio-label mode-option${mode === m.value ? ' mode-option--active' : ''}`} onClick={() => setMode(m.value)}>
                   <input
                     type="radio"
@@ -113,15 +122,24 @@ export default function ScraperForm({ onSubmit, loading }) {
                   />
                   <span className="mode-option-label">[{m.value === mode ? '*' : ' '}] {m.label}</span>
                 </label>
-                <div className="mode-tooltip">
-                  <p className="mode-option-desc">{m.description}</p>
-                  <div className="mode-option-tags">
-                    {m.tags.map(tag => <span key={tag} className="mode-tag">{tag}</span>)}
-                  </div>
-                </div>
               </div>
             ))}
           </div>
+
+          {tooltip && (
+            <div
+              className="mode-tooltip"
+              style={{
+                top: Math.min(tooltip.y, window.innerHeight - 140),
+                left: Math.min(tooltip.x, window.innerWidth - 260),
+              }}
+            >
+              <p className="mode-option-desc">{tooltip.mode.description}</p>
+              <div className="mode-option-tags">
+                {tooltip.mode.tags.map(tag => <span key={tag} className="mode-tag">{tag}</span>)}
+              </div>
+            </div>
+          )}
         </div>
 
         <br />
@@ -156,7 +174,7 @@ export default function ScraperForm({ onSubmit, loading }) {
         <br />
 
         <button type="submit" className="btn">
-          ./EXECUTE_SCRAPER.sh <span className="blink">_</span>
+          EXECUTE <span className="blink">_</span>
         </button>
       </form>
     </div>
