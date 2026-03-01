@@ -1,12 +1,15 @@
 import time
 import json
 import requests
+import urllib3
 import threading
 from queue import Queue
 from urllib.parse import urlparse, urljoin, urldefrag
 from concurrent.futures import ThreadPoolExecutor
 
 from bs4 import BeautifulSoup
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 try:
     from selenium import webdriver
@@ -57,7 +60,7 @@ class UltraFastCrawler:
 
     def fetch_requests(self, url):
         try:
-            r = requests.get(url, timeout=8, headers={
+            r = requests.get(url, timeout=8, verify=False, headers={
                 "User-Agent": "Mozilla/5.0 (compatible; Scrapee/1.0)"
             })
             if r.status_code == 200:

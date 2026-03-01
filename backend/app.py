@@ -97,7 +97,7 @@ def debug_scrape():
     trace = []
 
     try:
-        r = req.get(url, timeout=8, headers={'User-Agent': 'Mozilla/5.0 (compatible; Scrapee/1.0)'})
+        r = req.get(url, timeout=8, verify=False, headers={'User-Agent': 'Mozilla/5.0 (compatible; Scrapee/1.0)'})
         trace.append({'step': 'fetch', 'status_code': r.status_code, 'html_length': len(r.text)})
 
         from bs4 import BeautifulSoup
