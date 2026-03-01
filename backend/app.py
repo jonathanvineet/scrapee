@@ -86,6 +86,37 @@ def parse_html(url, html, mode):
     return result
 
 
+@app.route('/api/debug-scrape', methods=['POST'])
+def debug_scrape():
+    """Debug endpoint to trace crawl step by step."""
+    import traceback
+    import requests as req
+
+    data = request.get_json()
+    url = data.get('url', 'https://example.com')
+    trace = []
+
+    try:
+        r = req.get(url, timeout=8, headers={'User-Agent': 'Mozilla/5.0 (compatible; Scrapee/1.0)'})
+        trace.append({'step': 'fetch', 'status_code': r.status_code, 'html_length': len(r.text)})
+
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(r.text, 'html.parser')
+        title = soup.title.string.strip() if soup.title and soup.title.string else ''
+        links = [tag['href'] for tag in soup.find_all('a', href=True)]
+        trace.append({'step': 'parse', 'title': title, 'links_count': len(links), 'sample_links': links[:5]})
+
+        # Now try SmartCrawler directly
+        crawler = SmartCrawler(start_url=url, max_depth=0)
+        result = crawler.crawl()
+        trace.append({'step': 'smart_crawler', 'pages_returned': len(result), 'urls': list(result.keys())})
+
+    except Exception as e:
+        trace.append({'step': 'error', 'error': str(e), 'traceback': traceback.format_exc()})
+
+    return jsonify({'trace': trace}), 200
+
+
 @app.route('/api/health', methods=['GET'])
 def health():
     return jsonify({
