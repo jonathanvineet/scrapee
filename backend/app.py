@@ -1,15 +1,33 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
+import sys
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
-from selenium_crawler import SeleniumCrawler
-from smart_crawler import SmartCrawler
-from pipeline_crawler import UltraFastCrawler
-
 load_dotenv()
+
+# Track import errors
+_import_errors = {}
+
+try:
+    from selenium_crawler import SeleniumCrawler
+except Exception as e:
+    _import_errors['selenium_crawler'] = str(e)
+    SeleniumCrawler = None
+
+try:
+    from smart_crawler import SmartCrawler
+except Exception as e:
+    _import_errors['smart_crawler'] = str(e)
+    SmartCrawler = None
+
+try:
+    from pipeline_crawler import UltraFastCrawler
+except Exception as e:
+    _import_errors['pipeline_crawler'] = str(e)
+    UltraFastCrawler = None
 
 app = Flask(__name__)
 CORS(app)
@@ -70,7 +88,16 @@ def parse_html(url, html, mode):
 
 @app.route('/api/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'ok', 'message': 'Scrapee API is running'}), 200
+    return jsonify({
+        'status': 'ok',
+        'message': 'Scrapee API is running',
+        'import_errors': _import_errors,
+        'crawlers': {
+            'SeleniumCrawler': SeleniumCrawler is not None,
+            'SmartCrawler': SmartCrawler is not None,
+            'UltraFastCrawler': UltraFastCrawler is not None,
+        }
+    }), 200
 
 
 @app.route('/api/scrape', methods=['POST'])
@@ -106,10 +133,16 @@ def scrape():
         for start_url in urls:
             try:
                 if mode == 'fast':
+                    if SeleniumCrawler is None:
+                        return jsonify({'error': f"SeleniumCrawler failed to import: {_import_errors.get('selenium_crawler')}"}), 500
                     crawler = SeleniumCrawler(start_url=start_url, max_depth=max_depth)
                 elif mode == 'pipeline':
+                    if UltraFastCrawler is None:
+                        return jsonify({'error': f"UltraFastCrawler failed to import: {_import_errors.get('pipeline_crawler')}"}), 500
                     crawler = UltraFastCrawler(start_url=start_url, max_depth=max_depth, max_workers=8)
                 else:  # smart (default)
+                    if SmartCrawler is None:
+                        return jsonify({'error': f"SmartCrawler failed to import: {_import_errors.get('smart_crawler')}"}), 500
                     crawler = SmartCrawler(start_url=start_url, max_depth=max_depth)
 
                 raw = crawler.crawl()  # {url: html, ...}
