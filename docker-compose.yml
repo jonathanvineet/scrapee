@@ -1,3 +1,10 @@
+# -------------------------------------------------------
+# LOCAL TESTING ONLY
+# For production, frontend is on Vercel (scrapee-wine.vercel.app)
+# and backend is on Vercel (scrapee-backend.vercel.app)
+# Run locally: docker-compose up
+# -------------------------------------------------------
+
 version: '3.8'
 
 services:
@@ -21,6 +28,7 @@ services:
     ports:
       - "3000:3000"
     environment:
+      # Points to local backend container for docker-compose testing
       NEXT_PUBLIC_API_URL: http://backend:5000
     depends_on:
       - backend
