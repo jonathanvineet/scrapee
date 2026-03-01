@@ -103,8 +103,8 @@ export default function ScraperForm({ onSubmit, loading }) {
           <span className="label">OP_MODE:</span>
           <div className="radio-group" style={{ flexDirection: 'column' }}>
             {MODES.map((m) => (
-              <label key={m.value} className={`radio-label mode-option${mode === m.value ? ' mode-option--active' : ''}`} onClick={() => setMode(m.value)}>
-                <div className="mode-option-header">
+              <div key={m.value} className="mode-option-wrapper">
+                <label className={`radio-label mode-option${mode === m.value ? ' mode-option--active' : ''}`} onClick={() => setMode(m.value)}>
                   <input
                     type="radio"
                     value={m.value}
@@ -112,12 +112,14 @@ export default function ScraperForm({ onSubmit, loading }) {
                     onChange={(e) => setMode(e.target.value)}
                   />
                   <span className="mode-option-label">[{m.value === mode ? '*' : ' '}] {m.label}</span>
+                </label>
+                <div className="mode-tooltip">
+                  <p className="mode-option-desc">{m.description}</p>
+                  <div className="mode-option-tags">
+                    {m.tags.map(tag => <span key={tag} className="mode-tag">{tag}</span>)}
+                  </div>
                 </div>
-                <p className="mode-option-desc">{m.description}</p>
-                <div className="mode-option-tags">
-                  {m.tags.map(tag => <span key={tag} className="mode-tag">{tag}</span>)}
-                </div>
-              </label>
+              </div>
             ))}
           </div>
         </div>
