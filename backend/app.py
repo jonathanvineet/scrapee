@@ -31,6 +31,10 @@ except Exception as e:
 
 app = Flask(__name__)
 
+# Global history storage for scraped pages (keyed by URL)
+_history = {}
+SCRAPED_PAGES = {}  # For MCP server
+
 # Configure CORS for local development and production (Vercel)
 allowed_origins = [
     'http://localhost:3000',           # Local frontend
@@ -67,7 +71,8 @@ cors_config = {
 }
 
 CORS(app, resources={
-    r"/api/*": cors_config
+    r"/api/*": cors_config,
+    r"/mcp/*": cors_config
 })
 
 
@@ -247,6 +252,19 @@ def scrape():
                 for page_url, html in raw.items():
                     parsed = parse_html(page_url, html, mode)
                     all_results.append(parsed)
+                    # Store in history for MCP access
+                    _history[page_url] = parsed
+                    # Store in SCRAPED_PAGES for MCP server
+                    content_text = f"Title: {parsed.get('title', 'N/A')}\n\nHeadings:\n"
+                    for h in parsed.get('headings', []):
+                        content_text += f"- {h.get('text', '')}\n"
+                    content_text += f"\nContent:\n"
+                    for p in parsed.get('paragraphs', [])[:10]:
+                        content_text += f"- {p}\n"
+                    content_text += f"\nLinks ({parsed.get('links_count', 0)} total):\n"
+                    for link in parsed.get('links', [])[:20]:
+                        content_text += f"- {link.get('text', '')}: {link.get('url', '')}\n"
+                    SCRAPED_PAGES[page_url] = {"content": content_text}
 
             except RuntimeError as e:
                 # Selenium not available in this environment
@@ -280,7 +298,63 @@ def validate_urls():
 
 @app.route('/api/scrape/history', methods=['GET'])
 def get_history():
-    return jsonify({'data': []}), 200
+    return jsonify({'data': list(_history.values())}), 200
+
+
+@app.route('/mcp/page', methods=['GET', 'POST'])
+def mcp_page():
+    """Simple MCP server endpoint"""
+    
+    # MCP client sends POST JSON-RPC
+    if request.method == 'POST':
+        data = request.json
+        method = data.get('method')
+        params = data.get('params', {})
+
+        if method == 'tools/list':
+            return jsonify({
+                'jsonrpc': '2.0',
+                'result': {
+                    'tools': [
+                        {
+                            'name': 'get_page_context',
+                            'description': 'Return scraped page content',
+                            'inputSchema': {
+                                'type': 'object',
+                                'properties': {
+                                    'url': {'type': 'string'}
+                                }
+                            }
+                        }
+                    ]
+                },
+                'id': data.get('id')
+            })
+
+        if method == 'tools/call':
+            url = params.get('arguments', {}).get('url')
+            page = SCRAPED_PAGES.get(url)
+
+            return jsonify({
+                'jsonrpc': '2.0',
+                'result': {
+                    'content': [
+                        {
+                            'type': 'text',
+                            'text': page['content'] if page else f'No page found. Please scrape {url} first.'
+                        }
+                    ]
+                },
+                'id': data.get('id')
+            })
+
+    # Browser GET request (for testing)
+    url = request.args.get('url')
+    return jsonify({
+        'message': 'MCP server running',
+        'url': url,
+        'scraped_pages': list(SCRAPED_PAGES.keys())
+    })
 
 
 if __name__ == '__main__':
