@@ -34,15 +34,22 @@ app = Flask(__name__)
 # Configure CORS for local development and production (Vercel)
 allowed_origins = [
     'http://localhost:3000',           # Local frontend
+    'http://localhost:8080',           # Local backend proxy
     'http://127.0.0.1:3000',           # Local frontend (127.0.0.1)
     'https://localhost:3000',          # Local frontend (HTTPS)
+    'https://scrapee-wine.vercel.app', # Production frontend
+    'https://scrapee.vercel.app',      # Alternative production frontend
 ]
 
-# Add production origins from environment variable if provided
+# Add production origins from environment variables if provided
 vercel_url = os.getenv('VERCEL_URL')
+frontend_url = os.getenv('FRONTEND_URL')
 if vercel_url:
     allowed_origins.append(f'https://{vercel_url}')
     allowed_origins.append(f'http://{vercel_url}')  # Non-HTTPS for staging
+
+if frontend_url:
+    allowed_origins.append(frontend_url)
 
 # Development mode: allow all origins (easier debugging)
 flask_env = os.getenv('FLASK_ENV', 'development')
