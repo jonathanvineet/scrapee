@@ -27,7 +27,11 @@ function PageCard({ page, index }) {
       {page.headings?.length > 0 && (
         <Section title="HEADINGS" count={page.headings.length}>
           <ul className="result-list">
-            {page.headings.map((h, i) => <li key={i}>{h}</li>)}
+            {page.headings.map((h, i) => (
+              <li key={i}>
+                <span className="heading-level">[{h.level || '?'}]</span> {h.text || h}
+              </li>
+            ))}
           </ul>
         </Section>
       )}
@@ -35,7 +39,7 @@ function PageCard({ page, index }) {
       {page.paragraphs?.length > 0 && (
         <Section title="CONTENT" count={page.paragraphs.length}>
           <ul className="result-list">
-            {page.paragraphs.map((p, i) => <li key={i}>{p}</li>)}
+            {page.paragraphs.map((p, i) => <li key={i} className="result-paragraph">{p}</li>)}
           </ul>
         </Section>
       )}
@@ -58,7 +62,14 @@ function PageCard({ page, index }) {
       {page.images?.length > 0 && (
         <Section title="IMAGES" count={page.images.length}>
           <ul className="result-list">
-            {page.images.map((img, i) => <li key={i}>{img}</li>)}
+            {page.images.map((img, i) => (
+              <li key={i}>
+                <span className="image-alt">[{img.alt || 'NO_ALT'}]</span>
+                <a href={img.src} target="_blank" rel="noopener noreferrer" className="result-link-url" style={{ marginLeft: '10px' }}>
+                  {img.src}
+                </a>
+              </li>
+            ))}
           </ul>
         </Section>
       )}

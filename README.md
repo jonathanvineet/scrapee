@@ -128,7 +128,7 @@ git push heroku main
 ```
 FLASK_ENV=development
 FLASK_DEBUG=True
-FLASK_PORT=5000
+FLASK_PORT=8080
 ```
 
 ### Frontend (.env.local)

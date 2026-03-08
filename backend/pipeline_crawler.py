@@ -53,6 +53,13 @@ class UltraFastCrawler:
             return False
         if parsed.netloc != self.base_domain:
             return False
+
+        # Avoid auth/utility pages
+        path = parsed.path.lower()
+        junk_paths = ['login', 'signin', 'signup', 'register', 'logout', 'password-reset', 'cart', 'checkout', 'telemetry', 'track']
+        if any(jp in path for jp in junk_paths):
+            return False
+
         if self.allowed_prefix:
             if not parsed.path.startswith(self.allowed_prefix):
                 return False

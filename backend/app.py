@@ -30,21 +30,76 @@ except Exception as e:
     UltraFastCrawler = None
 
 app = Flask(__name__)
-CORS(app)
+
+# Configure CORS for local development and production (Vercel)
+allowed_origins = [
+    'http://localhost:3000',           # Local frontend
+    'http://127.0.0.1:3000',           # Local frontend (127.0.0.1)
+    'https://localhost:3000',          # Local frontend (HTTPS)
+]
+
+# Add production origins from environment variable if provided
+vercel_url = os.getenv('VERCEL_URL')
+if vercel_url:
+    allowed_origins.append(f'https://{vercel_url}')
+    allowed_origins.append(f'http://{vercel_url}')  # Non-HTTPS for staging
+
+# Development mode: allow all origins (easier debugging)
+flask_env = os.getenv('FLASK_ENV', 'development')
+if flask_env == 'development':
+    allowed_origins = '*'
+
+# Configure CORS with explicit settings
+cors_config = {
+    "origins": allowed_origins,
+    "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    "allow_headers": ["Content-Type", "Authorization"],
+    "expose_headers": ["Content-Type"],
+    "supports_credentials": True,
+    "max_age": 3600
+}
+
+CORS(app, resources={
+    r"/api/*": cors_config
+})
 
 
 def parse_html(url, html, mode):
-    """Parse raw HTML into structured data."""
+    """Parse raw HTML into structured data with boilerplate filtering."""
     soup = BeautifulSoup(html, 'html.parser')
+
+    # Common boilerplate/utility keywords to filter out
+    JUNK_KEYWORDS = [
+        'sign in', 'login', 'log in', 'logout', 'sign out', 'sign up', 'register', 
+        'create account', 'my account', 'privacy policy', 'terms of service', 
+        'terms of use', 'contact us', 'careers', 'jobs', 'about us', 'newsletter', 
+        'subscribe', 'cookie policy', 'site map', 'sitemap', 'help center', 
+        'support', 'faq', 'copyright', 'all rights reserved', 'advertisement', 'sponsor',
+        'facebook', 'twitter', 'instagram', 'linkedin', 'youtube', 'tiktok', 'pinterest',
+        'logo', 'icon', 'avatar'
+    ]
+
+    def is_junk(text):
+        if not text:
+            return False
+        low = text.lower().strip()
+        # Check if the text matches any junk keyword
+        return any(kw in low for kw in JUNK_KEYWORDS)
 
     # Links — always extracted
     links = []
     for tag in soup.find_all('a', href=True):
         href = urljoin(url, tag['href'])
+        text = tag.get_text(strip=True)
+        
+        # Skip junk links (by text or by URL fragment)
+        if is_junk(text) or is_junk(href):
+            continue
+            
         if href.startswith('http'):
             links.append({
                 'url': href.rstrip('/'),
-                'text': tag.get_text(strip=True) or href
+                'text': text or href
             })
 
     result = {
@@ -63,19 +118,23 @@ def parse_html(url, html, mode):
         headings = []
         for tag in soup.find_all(['h1', 'h2', 'h3']):
             text = tag.get_text(strip=True)
-            if text:
+            if text and not is_junk(text) and len(text) > 2:
                 headings.append({'level': tag.name, 'text': text})
 
         paragraphs = []
         for p in soup.find_all('p'):
             text = p.get_text(strip=True)
-            if len(text) > 40:
+            # Filter short or junk paragraphs
+            if len(text) > 45 and not is_junk(text):
                 paragraphs.append(text)
 
         images = []
         for img in soup.find_all('img', src=True):
             src = urljoin(url, img['src'])
             alt = img.get('alt', '')
+            # Skip images with junk alt text or junk src (social icons etc)
+            if is_junk(alt) or is_junk(src):
+                continue
             images.append({'src': src, 'alt': alt})
 
         result['meta_description'] = meta_desc
@@ -219,6 +278,6 @@ def get_history():
 
 if __name__ == '__main__':
     debug = os.getenv('FLASK_DEBUG', 'False') == 'True'
-    port = int(os.getenv('FLASK_PORT', 5000))
+    port = int(os.getenv('FLASK_PORT', 8080))
     app.run(debug=debug, host='0.0.0.0', port=port)
 

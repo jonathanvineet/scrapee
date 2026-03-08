@@ -1,0 +1,17 @@
+{
+  "name": "scrapee",
+  "version": "1.0.0",
+  "description": "Full-stack web scraper application",
+  "scripts": {
+    "dev": "concurrently --names \"BACKEND,FRONTEND\" --prefix \"[{name}]\" \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:backend": "cd backend && source venv/bin/activate && FLASK_ENV=development FLASK_DEBUG=True FLASK_PORT=8080 python3 app.py",
+    "dev:frontend": "cd frontend && npm run dev",
+    "build": "npm --prefix frontend install && npm --prefix frontend run build",
+    "start": "concurrently --names \"BACKEND,FRONTEND\" --prefix \"[{name}]\" \"npm run start:backend\" \"npm run start:frontend\"",
+    "start:backend": "cd backend && source venv/bin/activate && FLASK_ENV=production python3 app.py",
+    "start:frontend": "cd frontend && npm start"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0"
+  }
+}
