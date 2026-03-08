@@ -1,10 +1,12 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 import os
 import sys
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+from sentence_transformers import SentenceTransformer
+import numpy as np
 
 load_dotenv()
 
@@ -34,6 +36,44 @@ app = Flask(__name__)
 # Global history storage for scraped pages (keyed by URL)
 _history = {}
 SCRAPED_PAGES = {}  # For MCP server
+
+# Semantic search index (lazy-loaded)
+_model = None
+DOC_INDEX = []
+DOC_EMBEDDINGS = []
+
+
+def get_model():
+    """Lazy-load the embedding model (downloads on first use, ~400MB)."""
+    global _model
+    if _model is None:
+        _model = SentenceTransformer("all-MiniLM-L6-v2")
+    return _model
+
+
+def semantic_search(query, top_k=3):
+    """Return top_k URLs most similar to the query using cosine similarity."""
+    if not DOC_EMBEDDINGS:
+        return []
+
+    try:
+        model = get_model()
+        q_emb = model.encode(query)
+    except Exception:
+        return []
+
+    sims = []
+    for i, emb in enumerate(DOC_EMBEDDINGS):
+        # cosine similarity
+        denom = (np.linalg.norm(q_emb) * np.linalg.norm(emb))
+        if denom == 0:
+            score = 0
+        else:
+            score = float(np.dot(q_emb, emb) / denom)
+        sims.append((score, DOC_INDEX[i]))
+
+    sims.sort(reverse=True, key=lambda x: x[0])
+    return [url for score, url in sims[:top_k]]
 
 # Configure CORS for local development and production (Vercel)
 allowed_origins = [
@@ -254,17 +294,24 @@ def scrape():
                     all_results.append(parsed)
                     # Store in history for MCP access
                     _history[page_url] = parsed
-                    # Store in SCRAPED_PAGES for MCP server
-                    content_text = f"Title: {parsed.get('title', 'N/A')}\n\nHeadings:\n"
-                    for h in parsed.get('headings', []):
-                        content_text += f"- {h.get('text', '')}\n"
-                    content_text += f"\nContent:\n"
+                    # Store in SCRAPED_PAGES for MCP server (concise content used for embeddings)
+                    content_text = parsed.get('title', '') + " "
+
                     for p in parsed.get('paragraphs', [])[:10]:
-                        content_text += f"- {p}\n"
-                    content_text += f"\nLinks ({parsed.get('links_count', 0)} total):\n"
-                    for link in parsed.get('links', [])[:20]:
-                        content_text += f"- {link.get('text', '')}: {link.get('url', '')}\n"
+                        content_text += p + " "
+
                     SCRAPED_PAGES[page_url] = {"content": content_text}
+
+                    # Build and store embedding (avoid duplicates)
+                    try:
+                        model = get_model()
+                        emb = model.encode(content_text)
+                        if page_url not in DOC_INDEX:
+                            DOC_INDEX.append(page_url)
+                            DOC_EMBEDDINGS.append(emb)
+                    except Exception:
+                        # If embedding fails, continue without index entry
+                        pass
 
             except RuntimeError as e:
                 # Selenium not available in this environment
@@ -305,13 +352,20 @@ def get_history():
 def mcp():
     """Full MCP lifecycle handler (initialize, tools/list, tools/call).
 
-    - GET: quick server check for browsers and VS Code
+    - GET: SSE stream for async notifications (keeps connection alive)
     - POST: JSON-RPC 2.0 requests from MCP client (VS Code)
     """
 
-    # Browser test / quick health check
+    # SSE notification stream for VS Code persistent connection
     if request.method == 'GET':
-        return jsonify({"status": "scrapee MCP server running"}), 200
+        def event_stream():
+            # Send keepalive comments every 30 seconds
+            import time
+            while True:
+                yield ': keepalive\n\n'
+                time.sleep(30)
+        
+        return Response(event_stream(), mimetype='text/event-stream')
 
     # POST — JSON-RPC requests
     data = request.get_json() or {}
@@ -347,14 +401,35 @@ def mcp():
             'result': {
                 'tools': [
                     {
-                        'name': 'get_page_context',
-                        'description': 'Return scraped page content',
+                        'name': 'search_docs',
+                        'description': 'Search scraped documentation',
+                        'inputSchema': {
+                            'type': 'object',
+                            'properties': {
+                                'query': {'type': 'string'}
+                            },
+                            'required': ['query']
+                        }
+                    },
+
+                    {
+                        'name': 'get_doc',
+                        'description': 'Get documentation content',
                         'inputSchema': {
                             'type': 'object',
                             'properties': {
                                 'url': {'type': 'string'}
                             },
                             'required': ['url']
+                        }
+                    },
+
+                    {
+                        'name': 'list_docs',
+                        'description': 'List all scraped docs',
+                        'inputSchema': {
+                            'type': 'object',
+                            'properties': {}
                         }
                     }
                 ]
@@ -366,12 +441,86 @@ def mcp():
         params = data.get('params', {})
         tool = params.get('name')
         arguments = params.get('arguments', {})
+        # list_docs: returns all indexed doc URLs
+        if tool == 'list_docs':
+            return jsonify({
+                'jsonrpc': '2.0',
+                'id': request_id,
+                'result': {
+                    'content': [
+                        {'type': 'text', 'text': "\n".join(DOC_INDEX)}
+                    ]
+                }
+            })
 
+        # search_docs: semantic search over indexed docs
+        if tool == 'search_docs':
+            query = arguments.get('query', '')
+            results = semantic_search(query)
+            return jsonify({
+                'jsonrpc': '2.0',
+                'id': request_id,
+                'result': {
+                    'content': [
+                        {'type': 'text', 'text': "\n".join(results)}
+                    ]
+                }
+            })
+
+        # get_doc: return a document's stored content
+        if tool == 'get_doc':
+            url = arguments.get('url')
+            page = SCRAPED_PAGES.get(url)
+            text = page['content'] if page else 'Document not found'
+
+            return jsonify({
+                'jsonrpc': '2.0',
+                'id': request_id,
+                'result': {
+                    'content': [
+                        {'type': 'text', 'text': text}
+                    ]
+                }
+            })
+
+        # Backwards-compatible: get_page_context behaves like get_doc and auto-scrapes if missing
         if tool == 'get_page_context':
             url = arguments.get('url')
             page = SCRAPED_PAGES.get(url)
-            text = page['content'] if page else 'Page not scraped'
 
+            if not page:
+                try:
+                    crawler = SmartCrawler(start_url=url, max_depth=0)
+                    raw = crawler.crawl()
+
+                    for page_url, html in raw.items():
+                        parsed = parse_html(page_url, html, "smart")
+                        content_text = parsed.get('title', '') + " "
+                        for p in parsed.get('paragraphs', [])[:10]:
+                            content_text += p + " "
+                        SCRAPED_PAGES[page_url] = {"content": content_text}
+                        try:
+                            model = get_model()
+                            emb = model.encode(content_text)
+                            if page_url not in DOC_INDEX:
+                                DOC_INDEX.append(page_url)
+                                DOC_EMBEDDINGS.append(emb)
+                        except Exception:
+                            pass
+
+                    page = SCRAPED_PAGES.get(url)
+
+                except Exception as e:
+                    return jsonify({
+                        'jsonrpc': '2.0',
+                        'id': request_id,
+                        'error': {
+                            'code': -32000,
+                            'message': str(e)
+                        }
+                    })
+
+            text = page['content'] if page else 'Failed to scrape page'
             return jsonify({
                 'jsonrpc': '2.0',
                 'id': request_id,
