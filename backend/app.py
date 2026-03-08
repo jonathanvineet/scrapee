@@ -301,60 +301,96 @@ def get_history():
     return jsonify({'data': list(_history.values())}), 200
 
 
-@app.route('/mcp/page', methods=['GET', 'POST'])
-def mcp_page():
-    """Simple MCP server endpoint"""
-    
-    # MCP client sends POST JSON-RPC
-    if request.method == 'POST':
-        data = request.json
-        method = data.get('method')
-        params = data.get('params', {})
+@app.route('/mcp', methods=['GET', 'POST'])
+def mcp():
+    """Full MCP lifecycle handler (initialize, tools/list, tools/call).
 
-        if method == 'tools/list':
-            return jsonify({
-                'jsonrpc': '2.0',
-                'result': {
-                    'tools': [
-                        {
-                            'name': 'get_page_context',
-                            'description': 'Return scraped page content',
-                            'inputSchema': {
-                                'type': 'object',
-                                'properties': {
-                                    'url': {'type': 'string'}
-                                }
-                            }
-                        }
-                    ]
+    - GET: quick server check for browsers and VS Code
+    - POST: JSON-RPC 2.0 requests from MCP client (VS Code)
+    """
+
+    # Browser test / quick health check
+    if request.method == 'GET':
+        return jsonify({"status": "scrapee MCP server running"}), 200
+
+    # POST — JSON-RPC requests
+    data = request.get_json() or {}
+    method = data.get('method')
+    request_id = data.get('id')
+
+    # Notifications have no id — just acknowledge them silently
+    if request_id is None and method != 'initialize':
+        return '', 204
+
+    # MCP INITIALIZE HANDSHAKE
+    if method == 'initialize':
+        return jsonify({
+            'jsonrpc': '2.0',
+            'id': request_id,
+            'result': {
+                'protocolVersion': '2025-03-26',
+                'capabilities': {
+                    'tools': {}
                 },
-                'id': data.get('id')
-            })
+                'serverInfo': {
+                    'name': 'scrapee',
+                    'version': '1.0'
+                }
+            }
+        })
 
-        if method == 'tools/call':
-            url = params.get('arguments', {}).get('url')
+    # TOOL DISCOVERY
+    if method == 'tools/list':
+        return jsonify({
+            'jsonrpc': '2.0',
+            'id': request_id,
+            'result': {
+                'tools': [
+                    {
+                        'name': 'get_page_context',
+                        'description': 'Return scraped page content',
+                        'inputSchema': {
+                            'type': 'object',
+                            'properties': {
+                                'url': {'type': 'string'}
+                            },
+                            'required': ['url']
+                        }
+                    }
+                ]
+            }
+        })
+
+    # TOOL EXECUTION
+    if method == 'tools/call':
+        params = data.get('params', {})
+        tool = params.get('name')
+        arguments = params.get('arguments', {})
+
+        if tool == 'get_page_context':
+            url = arguments.get('url')
             page = SCRAPED_PAGES.get(url)
+            text = page['content'] if page else 'Page not scraped'
 
             return jsonify({
                 'jsonrpc': '2.0',
+                'id': request_id,
                 'result': {
                     'content': [
-                        {
-                            'type': 'text',
-                            'text': page['content'] if page else f'No page found. Please scrape {url} first.'
-                        }
+                        {'type': 'text', 'text': text}
                     ]
-                },
-                'id': data.get('id')
+                }
             })
 
-    # Browser GET request (for testing)
-    url = request.args.get('url')
+    # Method not found — always return HTTP 200 in JSON-RPC
     return jsonify({
-        'message': 'MCP server running',
-        'url': url,
-        'scraped_pages': list(SCRAPED_PAGES.keys())
-    })
+        'jsonrpc': '2.0',
+        'id': request_id,
+        'error': {
+            'code': -32601,
+            'message': 'Method not found'
+        }
+    }), 200
 
 
 if __name__ == '__main__':

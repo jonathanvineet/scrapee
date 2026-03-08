@@ -19,34 +19,18 @@ function PageCard({ page, index }) {
   const [mcpStatus, setMcpStatus] = useState('');
 
   const handleMcpConnect = () => {
-    try {
-      // Determine backend URL based on environment
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
-      
-      // Construct MCP endpoint URL with page URL as query parameter
-      const mcpEndpoint = `${apiUrl}/mcp/page?url=${encodeURIComponent(page.url)}`;
-      
-      // Create MCP configuration for VS Code
-      const config = {
-        name: `scrapee-${page.url.replace(/[^a-zA-Z0-9]/g, '-').substring(0, 30)}`,
-        type: "http",
-        url: mcpEndpoint
-      };
-      
-      // Create VS Code MCP install link
-      const installLink = `vscode:mcp/install?${encodeURIComponent(JSON.stringify(config))}`;
-      
-      // Trigger VS Code to install the MCP server
-      window.location.href = installLink;
-      
-      // Show confirmation
-      setMcpStatus('✓ Opening VS Code to install MCP server...');
-      setTimeout(() => setMcpStatus(''), 3000);
-    } catch (error) {
-      console.error('MCP connect error:', error);
-      setMcpStatus('✗ Failed to connect MCP server');
-      setTimeout(() => setMcpStatus(''), 3000);
-    }
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+
+    const config = {
+      name: 'scrapee',
+      type: 'http',
+      url: `${apiUrl}/mcp`
+    };
+
+    window.location.href = `vscode:mcp/install?${encodeURIComponent(JSON.stringify(config))}`;
+
+    setMcpStatus('✓ Opening VS Code...');
+    setTimeout(() => setMcpStatus(''), 3000);
   };
 
   return (
