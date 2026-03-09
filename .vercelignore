@@ -1,0 +1,20 @@
+# Vercel deployment exclusions
+node_modules
+.venv
+venv
+__pycache__
+*.pyc
+.env
+.env.local
+.env*.local
+.DS_Store
+*.log
+
+# Large scraped data files
+scraped_output.json
+scrapee-results-*.json
+
+# Development files
+.vscode
+.idea
+test_*.py
