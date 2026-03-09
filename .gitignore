@@ -14,3 +14,4 @@ venv/
 *.log
 scraped_output.json
 .vercel
+.env*.local

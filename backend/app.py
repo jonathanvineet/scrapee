@@ -215,6 +215,49 @@ def search_pages(query, top_k=5):
         return []
 
 
+def search_and_get(query, k=3, snippet_length=1000):
+    """Combined search and retrieve: reduces MCP tool calls from 2+ to 1.
+    
+    This is the recommended approach for production MCP servers.
+    Instead of: search_docs → get_doc → get_doc → get_doc
+    You get:    search_and_get → done (all results with snippets)
+    
+    Args:
+        query: Search query string
+        k: Number of top results to return (default 3)
+        snippet_length: Max chars per snippet (default 1000)
+        
+    Returns:
+        List of dicts with {url, title, snippet, full_content_available}
+    """
+    urls = search_pages(query, top_k=k)
+    
+    if not urls:
+        return []
+    
+    results = []
+    for url in urls:
+        content = get_page(url)
+        if content:
+            # Extract title (first line usually)
+            lines = content.split('\n')
+            title = lines[0] if lines else url
+            
+            # Create snippet
+            snippet = content[:snippet_length]
+            if len(content) > snippet_length:
+                snippet += "..."
+            
+            results.append({
+                "url": url,
+                "title": title,
+                "snippet": snippet,
+                "full_content_length": len(content)
+            })
+    
+    return results
+
+
 def get_vectorizer():
     """Get or create TF-IDF vectorizer (lazy-init)."""
     global _vectorizer
@@ -612,8 +655,33 @@ def mcp():
                     },
                     
                     {
+                        'name': 'search_and_get',
+                        'description': 'Search docs and return results with snippets in ONE call (recommended - reduces token cost)',
+                        'inputSchema': {
+                            'type': 'object',
+                            'properties': {
+                                'query': {
+                                    'type': 'string',
+                                    'description': 'Search query'
+                                },
+                                'k': {
+                                    'type': 'number',
+                                    'description': 'Number of results (default: 3)',
+                                    'default': 3
+                                },
+                                'snippet_length': {
+                                    'type': 'number',
+                                    'description': 'Max characters per snippet (default: 1000)',
+                                    'default': 1000
+                                }
+                            },
+                            'required': ['query']
+                        }
+                    },
+                    
+                    {
                         'name': 'search_docs',
-                        'description': 'Search scraped documentation using semantic search',
+                        'description': 'Search scraped documentation using semantic search (returns URLs only)',
                         'inputSchema': {
                             'type': 'object',
                             'properties': {
@@ -658,6 +726,30 @@ def mcp():
         params = data.get('params', {})
         tool = params.get('name')
         arguments = params.get('arguments', {})
+        
+        # search_and_get: combined search+retrieval (recommended)
+        if tool == 'search_and_get':
+            query = arguments.get('query', '')
+            k = arguments.get('k', 3)
+            snippet_length = arguments.get('snippet_length', 1000)
+            
+            results = search_and_get(query, k=k, snippet_length=snippet_length)
+            
+            # Format as markdown for readability
+            text = f"Found {len(results)} result(s) for: {query}\n\n"
+            for i, res in enumerate(results, 1):
+                text += f"**{i}. {res['title']}**\n"
+                text += f"URL: {res['url']}\n"
+                text += f"Snippet: {res['snippet']}\n"
+                text += f"Full content: {res['full_content_length']} chars\n\n"
+            
+            return jsonify({
+                'jsonrpc': '2.0',
+                'id': request_id,
+                'result': {
+                    'content': [{'type': 'text', 'text': text}]
+                }
+            })
         
         # scrape_url: scrape a webpage and store in knowledge base
         if tool == 'scrape_url':
