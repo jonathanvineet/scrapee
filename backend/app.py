@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 import os
 import sys
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -10,6 +10,54 @@ from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 
 load_dotenv()
+
+
+def normalize_url(url):
+    """Normalize URL by removing trailing slashes and standardizing format.
+    
+    This ensures consistent URL matching across scraping and retrieval.
+    Example: 'https://example.com/page/' -> 'https://example.com/page'
+    """
+    if not url:
+        return url
+    parsed = urlparse(url)
+    # Reconstruct URL without trailing slash on path
+    normalized = f"{parsed.scheme}://{parsed.netloc}{parsed.path.rstrip('/')}"
+    if parsed.query:
+        normalized += f"?{parsed.query}"
+    if parsed.fragment:
+        normalized += f"#{parsed.fragment}"
+    return normalized
+
+
+# Redis client setup for persistent storage (Vercel-compatible)
+redis_client = None
+try:
+    import redis
+    
+    redis_url = os.getenv('REDIS_URL')
+    if redis_url:
+        redis_client = redis.from_url(redis_url, decode_responses=True)
+    else:
+        # Fallback to individual connection params
+        redis_host = os.getenv('REDIS_HOST', 'localhost')
+        redis_port = int(os.getenv('REDIS_PORT', 6379))
+        redis_password = os.getenv('REDIS_PASSWORD')
+        
+        redis_client = redis.Redis(
+            host=redis_host,
+            port=redis_port,
+            password=redis_password,
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_timeout=5
+        )
+        # Test connection
+        redis_client.ping()
+except Exception as e:
+    _import_errors = {}
+    _import_errors['redis'] = str(e)
+    redis_client = None
 
 # Track import errors
 _import_errors = {}
@@ -36,12 +84,135 @@ app = Flask(__name__)
 
 # Global history storage for scraped pages (keyed by URL)
 _history = {}
-SCRAPED_PAGES = {}  # For MCP server
+SCRAPED_PAGES = {}  # For MCP server (fallback if Redis unavailable)
 
 # TF-IDF based semantic search (lightweight, Vercel-compatible)
 _vectorizer = None
 _tfidf_matrix = None
 DOC_INDEX = []
+
+
+# ============================================================================
+# REDIS PERSISTENCE LAYER
+# ============================================================================
+
+def save_page(url, content, metadata=None):
+    """Save scraped page content to Redis with fallback to memory.
+    
+    Args:
+        url: The page URL (will be normalized)
+        content: Text content of the page
+        metadata: Optional dict with title, paragraphs, etc.
+    """
+    normalized = normalize_url(url)
+    
+    if redis_client:
+        try:
+            # Store content
+            redis_client.set(f"page:{normalized}", content)
+            
+            # Store metadata if provided
+            if metadata:
+                import json
+                redis_client.set(f"meta:{normalized}", json.dumps(metadata))
+            
+            # Add to index
+            redis_client.sadd("doc_index", normalized)
+            return True
+        except Exception as e:
+            print(f"Redis save error: {e}")
+            # Fallback to memory
+    
+    # Fallback: use in-memory storage
+    SCRAPED_PAGES[normalized] = {"content": content}
+    if normalized not in DOC_INDEX:
+        DOC_INDEX.append(normalized)
+    return False
+
+
+def get_page(url):
+    """Retrieve page content from Redis or memory.
+    
+    Args:
+        url: The page URL (will be normalized)
+        
+    Returns:
+        String content or None if not found
+    """
+    normalized = normalize_url(url)
+    
+    if redis_client:
+        try:
+            content = redis_client.get(f"page:{normalized}")
+            if content:
+                return content
+        except Exception as e:
+            print(f"Redis get error: {e}")
+    
+    # Fallback to memory
+    page = SCRAPED_PAGES.get(normalized)
+    return page.get("content") if page else None
+
+
+def list_all_pages():
+    """List all indexed page URLs.
+    
+    Returns:
+        List of normalized URLs
+    """
+    if redis_client:
+        try:
+            urls = redis_client.smembers("doc_index")
+            return list(urls) if urls else []
+        except Exception as e:
+            print(f"Redis list error: {e}")
+    
+    # Fallback to memory
+    return DOC_INDEX.copy()
+
+
+def search_pages(query, top_k=5):
+    """Search pages using TF-IDF cosine similarity.
+    
+    Args:
+        query: Search query string
+        top_k: Number of results to return
+        
+    Returns:
+        List of matching URLs, ranked by relevance
+    """
+    all_urls = list_all_pages()
+    
+    if not all_urls:
+        return []
+    
+    try:
+        # Get all page contents
+        contents = []
+        valid_urls = []
+        
+        for url in all_urls:
+            content = get_page(url)
+            if content:
+                contents.append(content)
+                valid_urls.append(url)
+        
+        if not contents:
+            return []
+        
+        # TF-IDF search
+        vectorizer = get_vectorizer()
+        tfidf_matrix = vectorizer.fit_transform(contents)
+        query_vec = vectorizer.transform([query])
+        
+        similarities = cosine_similarity(query_vec, tfidf_matrix)[0]
+        top_indices = np.argsort(similarities)[::-1][:top_k]
+        
+        return [valid_urls[i] for i in top_indices if similarities[i] > 0]
+    
+    except Exception as e:
+        print(f"Search error: {e}")
+        return []
 
 
 def get_vectorizer():
@@ -52,34 +223,57 @@ def get_vectorizer():
     return _vectorizer
 
 
-def semantic_search(query, top_k=3):
-    """Return top_k URLs most similar to query using TF-IDF cosine similarity."""
-    global _tfidf_matrix
-    
-    if not DOC_INDEX:
-        return []
+# ============================================================================
+# PRELOAD DEFAULT DOCUMENTATION
+# ============================================================================
 
-    try:
-        vectorizer = get_vectorizer()
-        
-        # If matrix not built yet, build it from all doc contents
-        if _tfidf_matrix is None:
-            doc_texts = [SCRAPED_PAGES.get(url, {}).get('content', '') for url in DOC_INDEX]
-            _tfidf_matrix = vectorizer.fit_transform(doc_texts)
-        
-        # Transform query to TF-IDF vector
-        query_vec = vectorizer.transform([query])
-        
-        # Compute cosine similarities
-        sims = cosine_similarity(query_vec, _tfidf_matrix)[0]
-        
-        # Get top_k indices
-        top_indices = np.argsort(sims)[::-1][:top_k]
-        
-        return [DOC_INDEX[i] for i in top_indices if sims[i] > 0]
+DEFAULT_DOCS = [
+    "https://docs.hedera.com/hedera/getting-started",
+    "https://docs.hedera.com/hedera/sdks-and-apis/sdks/token-service/define-a-token",
+    "https://docs.hedera.com/hedera/sdks-and-apis/sdks/token-service/transfer-tokens",
+]
+
+
+def preload_docs():
+    """Preload default documentation into Redis on startup.
     
-    except Exception:
-        return []
+    This ensures MCP server has data available immediately without
+    requiring manual scraping first.
+    """
+    if not SmartCrawler:
+        print("SmartCrawler not available, skipping preload")
+        return
+    
+    print("Preloading default documentation...")
+    preloaded = 0
+    
+    for url in DEFAULT_DOCS:
+        # Check if already loaded
+        if get_page(url):
+            print(f"  ✓ Already loaded: {url}")
+            continue
+        
+        try:
+            print(f"  → Scraping: {url}")
+            crawler = SmartCrawler(start_url=url, max_depth=0)
+            raw = crawler.crawl()
+            
+            for page_url, html in raw.items():
+                parsed = parse_html(page_url, html, "smart")
+                
+                content_text = parsed.get('title', '') + "\n\n"
+                for p in parsed.get('paragraphs', [])[:20]:
+                    content_text += p + "\n"
+                
+                save_page(page_url, content_text, metadata=parsed)
+                preloaded += 1
+                print(f"  ✓ Saved: {page_url}")
+        
+        except Exception as e:
+            print(f"  ✗ Failed to preload {url}: {e}")
+    
+    print(f"Preloading complete: {preloaded} pages loaded")
+
 
 # Configure CORS for local development and production (Vercel)
 allowed_origins = [
@@ -298,19 +492,17 @@ def scrape():
                 for page_url, html in raw.items():
                     parsed = parse_html(page_url, html, mode)
                     all_results.append(parsed)
-                    # Store in history for MCP access
+                    
+                    # Store in history for API access
                     _history[page_url] = parsed
-                    # Store in SCRAPED_PAGES for MCP server
-                    content_text = parsed.get('title', '') + " "
-
-                    for p in parsed.get('paragraphs', [])[:10]:
-                        content_text += p + " "
-
-                    SCRAPED_PAGES[page_url] = {"content": content_text}
-
-                    # Index for semantic search (no embedding needed, just store URL)
-                    if page_url not in DOC_INDEX:
-                        DOC_INDEX.append(page_url)
+                    
+                    # Build content text for MCP server
+                    content_text = parsed.get('title', '') + "\n\n"
+                    for p in parsed.get('paragraphs', [])[:20]:
+                        content_text += p + "\n"
+                    
+                    # Save to Redis (with memory fallback)
+                    save_page(page_url, content_text, metadata=parsed)
 
             except RuntimeError as e:
                 # Selenium not available in this environment
@@ -400,12 +592,35 @@ def mcp():
             'result': {
                 'tools': [
                     {
-                        'name': 'search_docs',
-                        'description': 'Search scraped documentation',
+                        'name': 'scrape_url',
+                        'description': 'Scrape a webpage and store it in the knowledge base',
                         'inputSchema': {
                             'type': 'object',
                             'properties': {
-                                'query': {'type': 'string'}
+                                'url': {
+                                    'type': 'string',
+                                    'description': 'The URL to scrape'
+                                },
+                                'max_depth': {
+                                    'type': 'number',
+                                    'description': 'Maximum crawl depth (default: 0)',
+                                    'default': 0
+                                }
+                            },
+                            'required': ['url']
+                        }
+                    },
+                    
+                    {
+                        'name': 'search_docs',
+                        'description': 'Search scraped documentation using semantic search',
+                        'inputSchema': {
+                            'type': 'object',
+                            'properties': {
+                                'query': {
+                                    'type': 'string',
+                                    'description': 'Search query'
+                                }
                             },
                             'required': ['query']
                         }
@@ -413,11 +628,14 @@ def mcp():
 
                     {
                         'name': 'get_doc',
-                        'description': 'Get documentation content',
+                        'description': 'Get full documentation content by URL',
                         'inputSchema': {
                             'type': 'object',
                             'properties': {
-                                'url': {'type': 'string'}
+                                'url': {
+                                    'type': 'string',
+                                    'description': 'The exact URL of the document'
+                                }
                             },
                             'required': ['url']
                         }
@@ -425,7 +643,7 @@ def mcp():
 
                     {
                         'name': 'list_docs',
-                        'description': 'List all scraped docs',
+                        'description': 'List all URLs in the knowledge base',
                         'inputSchema': {
                             'type': 'object',
                             'properties': {}
@@ -440,37 +658,92 @@ def mcp():
         params = data.get('params', {})
         tool = params.get('name')
         arguments = params.get('arguments', {})
+        
+        # scrape_url: scrape a webpage and store in knowledge base
+        if tool == 'scrape_url':
+            url = arguments.get('url')
+            max_depth = arguments.get('max_depth', 0)
+            
+            if not url:
+                return jsonify({
+                    'jsonrpc': '2.0',
+                    'id': request_id,
+                    'error': {'code': -32602, 'message': 'URL is required'}
+                })
+            
+            try:
+                if SmartCrawler is None:
+                    return jsonify({
+                        'jsonrpc': '2.0',
+                        'id': request_id,
+                        'error': {'code': -32000, 'message': 'SmartCrawler not available'}
+                    })
+                
+                crawler = SmartCrawler(start_url=url, max_depth=max_depth)
+                raw = crawler.crawl()
+                
+                scraped_urls = []
+                for page_url, html in raw.items():
+                    parsed = parse_html(page_url, html, "smart")
+                    
+                    # Build content
+                    content_text = parsed.get('title', '') + "\n\n"
+                    for p in parsed.get('paragraphs', [])[:20]:
+                        content_text += p + "\n"
+                    
+                    # Save to Redis/memory
+                    save_page(page_url, content_text, metadata=parsed)
+                    scraped_urls.append(page_url)
+                
+                result_text = f"Successfully scraped {len(scraped_urls)} page(s):\n" + "\n".join(scraped_urls)
+                
+                return jsonify({
+                    'jsonrpc': '2.0',
+                    'id': request_id,
+                    'result': {
+                        'content': [{'type': 'text', 'text': result_text}]
+                    }
+                })
+            
+            except Exception as e:
+                return jsonify({
+                    'jsonrpc': '2.0',
+                    'id': request_id,
+                    'error': {'code': -32000, 'message': f'Scraping failed: {str(e)}'}
+                })
+        
         # list_docs: returns all indexed doc URLs
         if tool == 'list_docs':
+            all_urls = list_all_pages()
+            text = "\n".join(all_urls) if all_urls else "No documents in knowledge base"
+            
             return jsonify({
                 'jsonrpc': '2.0',
                 'id': request_id,
                 'result': {
-                    'content': [
-                        {'type': 'text', 'text': "\n".join(DOC_INDEX)}
-                    ]
+                    'content': [{'type': 'text', 'text': text}]
                 }
             })
 
         # search_docs: semantic search over indexed docs
         if tool == 'search_docs':
             query = arguments.get('query', '')
-            results = semantic_search(query)
+            results = search_pages(query, top_k=5)
+            text = "\n".join(results) if results else "No results found"
+            
             return jsonify({
                 'jsonrpc': '2.0',
                 'id': request_id,
                 'result': {
-                    'content': [
-                        {'type': 'text', 'text': "\n".join(results)}
-                    ]
+                    'content': [{'type': 'text', 'text': text}]
                 }
             })
 
         # get_doc: return a document's stored content
         if tool == 'get_doc':
             url = arguments.get('url')
-            page = SCRAPED_PAGES.get(url)
-            text = page['content'] if page else 'Document not found'
+            content = get_page(url)
+            text = content if content else 'Document not found'
 
             return jsonify({
                 'jsonrpc': '2.0',
@@ -485,26 +758,29 @@ def mcp():
         # Backwards-compatible: get_page_context behaves like get_doc and auto-scrapes if missing
         if tool == 'get_page_context':
             url = arguments.get('url')
-            page = SCRAPED_PAGES.get(url)
+            content = get_page(url)
 
-            if not page:
+            if not content:
                 try:
+                    if SmartCrawler is None:
+                        return jsonify({
+                            'jsonrpc': '2.0',
+                            'id': request_id,
+                            'error': {'code': -32000, 'message': 'SmartCrawler not available'}
+                        })
+                    
                     crawler = SmartCrawler(start_url=url, max_depth=0)
                     raw = crawler.crawl()
 
                     for page_url, html in raw.items():
                         parsed = parse_html(page_url, html, "smart")
-                        content_text = parsed.get('title', '') + " "
-                        for p in parsed.get('paragraphs', [])[:10]:
-                            content_text += p + " "
-                        SCRAPED_PAGES[page_url] = {"content": content_text}
-                        try:
-                            if page_url not in DOC_INDEX:
-                                DOC_INDEX.append(page_url)
-                        except Exception:
-                            pass
+                        content_text = parsed.get('title', '') + "\n\n"
+                        for p in parsed.get('paragraphs', [])[:20]:
+                            content_text += p + "\n"
+                        
+                        save_page(page_url, content_text, metadata=parsed)
 
-                    page = SCRAPED_PAGES.get(url)
+                    content = get_page(url)
 
                 except Exception as e:
                     return jsonify({
@@ -516,7 +792,7 @@ def mcp():
                         }
                     })
 
-            text = page['content'] if page else 'Failed to scrape page'
+            text = content if content else 'Failed to scrape page'
             return jsonify({
                 'jsonrpc': '2.0',
                 'id': request_id,
@@ -539,6 +815,9 @@ def mcp():
 
 
 if __name__ == '__main__':
+    # Preload default docs on startup
+    preload_docs()
+    
     debug = os.getenv('FLASK_DEBUG', 'False') == 'True'
     port = int(os.getenv('FLASK_PORT', 8080))
     app.run(debug=debug, host='0.0.0.0', port=port)
