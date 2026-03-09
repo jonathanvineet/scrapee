@@ -5,7 +5,8 @@ import sys
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from sentence_transformers import SentenceTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 
 load_dotenv()
@@ -37,43 +38,48 @@ app = Flask(__name__)
 _history = {}
 SCRAPED_PAGES = {}  # For MCP server
 
-# Semantic search index (lazy-loaded)
-_model = None
+# TF-IDF based semantic search (lightweight, Vercel-compatible)
+_vectorizer = None
+_tfidf_matrix = None
 DOC_INDEX = []
-DOC_EMBEDDINGS = []
 
 
-def get_model():
-    """Lazy-load the embedding model (downloads on first use, ~400MB)."""
-    global _model
-    if _model is None:
-        _model = SentenceTransformer("all-MiniLM-L6-v2")
-    return _model
+def get_vectorizer():
+    """Get or create TF-IDF vectorizer (lazy-init)."""
+    global _vectorizer
+    if _vectorizer is None:
+        _vectorizer = TfidfVectorizer(max_features=1000, stop_words='english')
+    return _vectorizer
 
 
 def semantic_search(query, top_k=3):
-    """Return top_k URLs most similar to the query using cosine similarity."""
-    if not DOC_EMBEDDINGS:
+    """Return top_k URLs most similar to query using TF-IDF cosine similarity."""
+    global _tfidf_matrix
+    
+    if not DOC_INDEX:
         return []
 
     try:
-        model = get_model()
-        q_emb = model.encode(query)
+        vectorizer = get_vectorizer()
+        
+        # If matrix not built yet, build it from all doc contents
+        if _tfidf_matrix is None:
+            doc_texts = [SCRAPED_PAGES.get(url, {}).get('content', '') for url in DOC_INDEX]
+            _tfidf_matrix = vectorizer.fit_transform(doc_texts)
+        
+        # Transform query to TF-IDF vector
+        query_vec = vectorizer.transform([query])
+        
+        # Compute cosine similarities
+        sims = cosine_similarity(query_vec, _tfidf_matrix)[0]
+        
+        # Get top_k indices
+        top_indices = np.argsort(sims)[::-1][:top_k]
+        
+        return [DOC_INDEX[i] for i in top_indices if sims[i] > 0]
+    
     except Exception:
         return []
-
-    sims = []
-    for i, emb in enumerate(DOC_EMBEDDINGS):
-        # cosine similarity
-        denom = (np.linalg.norm(q_emb) * np.linalg.norm(emb))
-        if denom == 0:
-            score = 0
-        else:
-            score = float(np.dot(q_emb, emb) / denom)
-        sims.append((score, DOC_INDEX[i]))
-
-    sims.sort(reverse=True, key=lambda x: x[0])
-    return [url for score, url in sims[:top_k]]
 
 # Configure CORS for local development and production (Vercel)
 allowed_origins = [
@@ -294,7 +300,7 @@ def scrape():
                     all_results.append(parsed)
                     # Store in history for MCP access
                     _history[page_url] = parsed
-                    # Store in SCRAPED_PAGES for MCP server (concise content used for embeddings)
+                    # Store in SCRAPED_PAGES for MCP server
                     content_text = parsed.get('title', '') + " "
 
                     for p in parsed.get('paragraphs', [])[:10]:
@@ -302,16 +308,9 @@ def scrape():
 
                     SCRAPED_PAGES[page_url] = {"content": content_text}
 
-                    # Build and store embedding (avoid duplicates)
-                    try:
-                        model = get_model()
-                        emb = model.encode(content_text)
-                        if page_url not in DOC_INDEX:
-                            DOC_INDEX.append(page_url)
-                            DOC_EMBEDDINGS.append(emb)
-                    except Exception:
-                        # If embedding fails, continue without index entry
-                        pass
+                    # Index for semantic search (no embedding needed, just store URL)
+                    if page_url not in DOC_INDEX:
+                        DOC_INDEX.append(page_url)
 
             except RuntimeError as e:
                 # Selenium not available in this environment
@@ -500,11 +499,8 @@ def mcp():
                             content_text += p + " "
                         SCRAPED_PAGES[page_url] = {"content": content_text}
                         try:
-                            model = get_model()
-                            emb = model.encode(content_text)
                             if page_url not in DOC_INDEX:
                                 DOC_INDEX.append(page_url)
-                                DOC_EMBEDDINGS.append(emb)
                         except Exception:
                             pass
 
