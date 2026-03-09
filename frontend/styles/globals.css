@@ -144,6 +144,23 @@ header p {
   color: var(--fg-error);
 }
 
+.btn-mcp {
+  background: none;
+  border: 1px solid var(--fg-muted);
+  color: var(--fg-muted);
+  cursor: pointer;
+  font-family: inherit;
+  padding: 0.4rem 0.8rem;
+  font-size: 0.85rem;
+  transition: all 0.2s;
+}
+
+.btn-mcp:hover {
+  background: var(--fg);
+  color: var(--bg);
+  border-color: var(--fg);
+}
+
 .radio-group {
   display: flex;
   gap: 1rem;

@@ -16,6 +16,23 @@ function Section({ title, count, children }) {
 }
 
 function PageCard({ page, index }) {
+  const [mcpStatus, setMcpStatus] = useState('');
+
+  const handleMcpConnect = () => {
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080';
+
+    const config = {
+      name: 'scrapee',
+      type: 'http',
+      url: `${apiUrl}/mcp`
+    };
+
+    window.location.href = `vscode:mcp/install?${encodeURIComponent(JSON.stringify(config))}`;
+
+    setMcpStatus('✓ Opening VS Code...');
+    setTimeout(() => setMcpStatus(''), 3000);
+  };
+
   return (
     <div className="page-card">
       <div className="page-card-header">
@@ -23,6 +40,21 @@ function PageCard({ page, index }) {
         <span className="page-card-title">{page.title || '(no title)'}</span>
       </div>
       <div className="page-card-url">{page.url}</div>
+      
+      <div style={{ marginTop: '10px', marginBottom: '10px' }}>
+        <button 
+          onClick={handleMcpConnect} 
+          className="btn-mcp"
+          title="Install this page's MCP server in VS Code"
+        >
+          [CONNECT MCP TO VSCODE]
+        </button>
+        {mcpStatus && (
+          <span style={{ marginLeft: '10px', color: mcpStatus.includes('✓') ? 'var(--fg-success, #0f0)' : 'var(--fg-error, #f00)' }}>
+            {mcpStatus}
+          </span>
+        )}
+      </div>
 
       {page.headings?.length > 0 && (
         <Section title="HEADINGS" count={page.headings.length}>
