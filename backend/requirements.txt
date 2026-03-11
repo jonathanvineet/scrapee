@@ -4,10 +4,10 @@ requests==2.31.0
 beautifulsoup4==4.12.0
 python-dotenv==1.0.0
 gunicorn==21.2.0
-scikit-learn==1.3.2
+scikit-learn==1.5.0
 redis==5.0.1
-numpy==1.24.3
-sentence-transformers==2.2.2
+numpy>=1.26.0
+sentence-transformers==3.0.1
 # Selenium (local/Docker only — not available on Vercel serverless)
 # selenium==4.18.0
 # webdriver-manager==4.0.1
