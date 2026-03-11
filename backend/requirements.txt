@@ -6,8 +6,7 @@ python-dotenv==1.0.0
 gunicorn==21.2.0
 scikit-learn==1.5.0
 redis==5.0.1
-numpy>=1.26.0
-sentence-transformers==3.0.1
-# Selenium (local/Docker only — not available on Vercel serverless)
-# selenium==4.18.0
-# webdriver-manager==4.0.1
+# For local semantic search (optional, heavy - not for Vercel):
+# sentence-transformers==3.0.1
+# torch==2.0.0
+# For Vercel: uses lightweight TF-IDF by default

@@ -1,6 +1,7 @@
 """
 Vector Search Engine for MCP Server
-Provides semantic search using sentence embeddings for documentation retrieval.
+Provides semantic search using TF-IDF (lightweight for serverless).
+Optional: Use sentence-transformers for better results in local/Docker deployments.
 """
 import os
 import numpy as np
@@ -8,7 +9,7 @@ from typing import List, Dict, Tuple
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# Try to use sentence-transformers if available, fallback to TF-IDF
+# Try to use sentence-transformers if available (NOT available on Vercel)
 _USE_EMBEDDINGS = False
 _model = None
 
@@ -18,8 +19,7 @@ try:
     _USE_EMBEDDINGS = True
     print("✓ Using sentence-transformers for semantic search")
 except ImportError:
-    print("⚠ sentence-transformers not available. Using TF-IDF fallback.")
-    _USE_EMBEDDINGS = False
+    print("⚠ sentence-transformers not available. Using TF-IDF (lightweight for serverless).")
 
 
 class VectorSearch:
