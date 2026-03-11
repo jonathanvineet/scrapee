@@ -1,0 +1,22 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "backend/api/mcp.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "backend/api/mcp.py"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "backend/api/mcp.py"
+    }
+  ],
+  "env": {
+    "REDIS_URL": "@redis-url"
+  }
+}
