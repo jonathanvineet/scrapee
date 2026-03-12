@@ -30,26 +30,10 @@ def normalize_url(url):
 # Track import errors
 _import_errors = {}
 
-try:
-    from selenium_crawler import SeleniumCrawler
-    SELENIUM_AVAILABLE = True
-except Exception as e:
-    _import_errors['selenium_crawler'] = str(e)
-    SELENIUM_AVAILABLE = False
-
-try:
-    from smart_crawler import SmartCrawler
-    SMART_CRAWLER_AVAILABLE = True
-except Exception as e:
-    _import_errors['smart_crawler'] = str(e)
-    SMART_CRAWLER_AVAILABLE = False
-
-try:
-    from pipeline_crawler import UltraFastCrawler
-    ULTRAFAST_AVAILABLE = True
-except Exception as e:
-    _import_errors['pipeline_crawler'] = str(e)
-    ULTRAFAST_AVAILABLE = False
+# Disable heavy crawlers for Vercel deployment
+SELENIUM_AVAILABLE = False
+SMART_CRAWLER_AVAILABLE = False  
+ULTRAFAST_AVAILABLE = False
 
 # Import MCP server
 try:
@@ -140,7 +124,7 @@ def preload_docs():
     This ensures MCP server has data available immediately without
     requiring manual scraping first.
     """
-    if not SmartCrawler:
+    if not SMART_CRAWLER_AVAILABLE:
         print("SmartCrawler not available, skipping preload")
         return
     
@@ -155,8 +139,9 @@ def preload_docs():
         
         try:
             print(f"  → Scraping: {url}")
-            crawler = SmartCrawler(start_url=url, max_depth=0)
-            raw = crawler.crawl()
+            # Crawler disabled for Vercel deployment
+            print(f"  ✗ Skipping {url}: crawlers disabled for Vercel")
+            continue
             
             for page_url, html in raw.items():
                 parsed = parse_html(page_url, html, "smart")
@@ -317,10 +302,8 @@ def debug_scrape():
         links = [tag['href'] for tag in soup.find_all('a', href=True)]
         trace.append({'step': 'parse', 'title': title, 'links_count': len(links), 'sample_links': links[:5]})
 
-        # Now try SmartCrawler directly
-        crawler = SmartCrawler(start_url=url, max_depth=0)
-        result = crawler.crawl()
-        trace.append({'step': 'smart_crawler', 'pages_returned': len(result), 'urls': list(result.keys())})
+        # SmartCrawler disabled for Vercel deployment
+        trace.append({'step': 'smart_crawler', 'pages_returned': 0, 'urls': [], 'note': 'Disabled for Vercel'})
 
     except Exception as e:
         trace.append({'step': 'error', 'error': str(e), 'traceback': traceback.format_exc()})
@@ -339,9 +322,9 @@ def health():
         'message': 'Scrapee API is running',
         'import_errors': _import_errors,
         'crawlers': {
-            'SeleniumCrawler': SeleniumCrawler is not None,
-            'SmartCrawler': SmartCrawler is not None,
-            'UltraFastCrawler': UltraFastCrawler is not None,
+            "smart": SMART_CRAWLER_AVAILABLE,
+            "selenium": SELENIUM_AVAILABLE,
+            "ultrafast": ULTRAFAST_AVAILABLE
         }
     }), 200
 
@@ -386,26 +369,23 @@ def scrape():
                     continue
 
                 if mode == 'fast':
-                    if SeleniumCrawler is None:
+                    if not SELENIUM_AVAILABLE:
                         return jsonify({
-                            'error': f"SeleniumCrawler not available: {_import_errors.get('selenium_crawler', 'Unknown error')}",
+                            'error': "SeleniumCrawler not available in Vercel deployment",
                             'status': 'failed'
                         }), 422
-                    crawler = SeleniumCrawler(start_url=start_url, max_depth=max_depth)
                 elif mode == 'pipeline':
-                    if UltraFastCrawler is None:
+                    if not ULTRAFAST_AVAILABLE:
                         return jsonify({
-                            'error': f"UltraFastCrawler not available: {_import_errors.get('pipeline_crawler', 'Unknown error')}",
+                            'error': "UltraFastCrawler not available in Vercel deployment",
                             'status': 'failed'
                         }), 422
-                    crawler = UltraFastCrawler(start_url=start_url, max_depth=max_depth, max_workers=8)
                 else:  # smart (default)
-                    if SmartCrawler is None:
+                    if not SMART_CRAWLER_AVAILABLE:
                         return jsonify({
-                            'error': f"SmartCrawler not available: {_import_errors.get('smart_crawler', 'Unknown error')}",
+                            'error': "SmartCrawler not available in Vercel deployment",
                             'status': 'failed'
                         }), 422
-                    crawler = SmartCrawler(start_url=start_url, max_depth=max_depth)
 
                 try:
                     # Crawling with timeout protection (Vercel function timeout is ~30s)
