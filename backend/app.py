@@ -70,20 +70,39 @@ except Exception as e:
 
 app = Flask(__name__)
 
-# Enable CORS for all routes
-CORS(app, resources={
-    r"/api/*": {
-        "origins": ["*"],
-        "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"],
-        "expose_headers": ["Content-Type"]
+# Configure CORS - allow all origins for frontend access
+CORS(app, 
+    resources={
+        r"/api/*": {
+            "origins": "*",
+            "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+            "allow_headers": ["Content-Type", "Authorization"],
+            "expose_headers": ["Content-Type"],
+            "supports_credentials": False,
+            "max_age": 3600
+        },
+        r"/mcp*": {
+            "origins": "*",
+            "methods": ["GET", "POST", "OPTIONS"],
+            "allow_headers": ["Content-Type", "Authorization"],
+            "expose_headers": ["Content-Type"],
+            "supports_credentials": False,
+            "max_age": 3600
+        }
     },
-    r"/mcp*": {
-        "origins": ["*"],
-        "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type"]
-    }
-})
+    send_wildcard=True,
+    supports_credentials=False
+)
+
+# Add after_request handler to ensure CORS headers are present
+@app.after_request
+def after_request(response):
+    """Ensure CORS headers are set on all responses."""
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    response.headers['Access-Control-Max-Age'] = '3600'
+    return response
 
 # Global history storage for scraped pages (keyed by URL)
 _history = {}
@@ -489,6 +508,12 @@ def validate_urls():
 @app.route('/api/scrape/history', methods=['GET'])
 def get_history():
     return jsonify({'data': list(_history.values())}), 200
+
+
+@app.route("/favicon.ico")
+def favicon():
+    """Return 204 for favicon requests (not found)."""
+    return "", 204
 
 
 @app.route("/api/health")
