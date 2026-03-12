@@ -5,16 +5,13 @@ Universal developer documentation assistant with advanced features.
 import json
 import sys
 import os
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 import re
 from urllib.parse import urlparse
 from datetime import datetime, timedelta
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from flask import Flask, request, jsonify
-from flask_cors import CORS
 
 from storage.sqlite_store import get_sqlite_store
 from index.vector_search import get_search_engine
@@ -845,64 +842,5 @@ Please provide:
         }
 
 
-# Flask app for deployment
-app = Flask(__name__)
-CORS(app)
-
-# Create server instance
+# Create module-level server instance for import
 mcp_server = ProductionMCPServer(use_sqlite=True)
-
-
-@app.route("/api/mcp", methods=["GET", "POST"])
-def mcp_endpoint():
-    """MCP server endpoint."""
-    
-    if request.method == "GET":
-        stats = mcp_server.store.get_stats()
-        return jsonify({
-            "status": "running",
-            "server": mcp_server.name,
-            "version": mcp_server.version,
-            "stats": stats
-        })
-    
-    try:
-        data = request.json
-        
-        if not data:
-            return jsonify({
-                "jsonrpc": "2.0",
-                "id": None,
-                "error": {
-                    "code": -32700,
-                    "message": "Parse error"
-                }
-            }), 400
-        
-        response = mcp_server.handle_request(data)
-        return jsonify(response)
-        
-    except Exception as e:
-        return jsonify({
-            "jsonrpc": "2.0",
-            "id": None,
-            "error": {
-                "code": -32603,
-                "message": f"Internal error: {str(e)}"
-            }
-        }), 500
-
-
-@app.route("/api/health", methods=["GET"])
-def health_check():
-    """Health check."""
-    return jsonify({
-        "status": "healthy",
-        "server": mcp_server.name,
-        "version": mcp_server.version
-    })
-
-
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", 5001))
-    app.run(host="0.0.0.0", port=port, debug=True)
