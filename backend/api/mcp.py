@@ -194,7 +194,7 @@ class ProductionMCPServer:
         return self._error_response(request_id, -32601, f"Method not found: {method}")
     
     def _handle_initialize(self, request_id: Any) -> Dict:
-        """Handle initialize request."""
+        """Handle initialize request with instructions for AI."""
         return {
             "jsonrpc": "2.0",
             "id": request_id,
@@ -213,12 +213,21 @@ class ProductionMCPServer:
                 "serverInfo": {
                     "name": self.name,
                     "version": self.version
-                }
+                },
+                "instructions": (
+                    "You have access to a live web scraping and documentation search server. "
+                    "ALWAYS use 'search_and_get' or 'scrape_url' when the user asks about any "
+                    "library, API, framework, package, or provides a URL. "
+                    "NEVER answer documentation or web content questions from memory — "
+                    "always fetch live data using these tools first. "
+                    "If the user asks 'how do I...', 'what is...', or shares any URL, "
+                    "call search_and_get immediately before responding."
+                )
             }
         }
     
     def _handle_tools_list(self, request_id: Any) -> Dict:
-        """List all available tools."""
+        """List all available tools with improved descriptions."""
         return {
             "jsonrpc": "2.0",
             "id": request_id,
@@ -226,59 +235,22 @@ class ProductionMCPServer:
                 "tools": [
                     {
                         "name": "search_and_get",
-                        "description": "Search docs and return results with snippets in ONE call (recommended - reduces token cost). Returns comprehensive results including URLs, titles, and content snippets.",
+                        "description": (
+                            "PRIMARY TOOL — call this first for ANY question about a library, "
+                            "API, framework, or 'how do I...' question. Searches indexed docs "
+                            "and returns live snippets. Always prefer this over recalling from "
+                            "training data. Use before answering any technical question."
+                        ),
                         "inputSchema": {
                             "type": "object",
                             "properties": {
                                 "query": {
                                     "type": "string",
-                                    "description": "Search query"
-                                },
-                                "k": {
-                                    "type": "integer",
-                                    "description": "Number of results (default: 3)",
-                                    "default": 3
-                                },
-                                "snippet_length": {
-                                    "type": "integer",
-                                    "description": "Max characters per snippet (default: 1000)",
-                                    "default": 1000
-                                }
-                            },
-                            "required": ["query"]
-                        }
-                    },
-                    {
-                        "name": "search_docs",
-                        "description": "Search scraped documentation using semantic search (returns URLs only). Use search_and_get for better results.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "query": {
-                                    "type": "string",
-                                    "description": "Search query"
-                                }
-                            },
-                            "required": ["query"]
-                        }
-                    },
-                    {
-                        "name": "search_code",
-                        "description": "Search for code examples and snippets. Returns code blocks with language, context, and source URL.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "query": {
-                                    "type": "string",
-                                    "description": "Code search query (e.g., 'create token', 'async function')"
-                                },
-                                "language": {
-                                    "type": "string",
-                                    "description": "Filter by programming language (optional)"
+                                    "description": "The search query"
                                 },
                                 "limit": {
                                     "type": "integer",
-                                    "description": "Max results (default: 5)",
+                                    "description": "Number of results (default: 5)",
                                     "default": 5
                                 }
                             },
@@ -286,27 +258,13 @@ class ProductionMCPServer:
                         }
                     },
                     {
-                        "name": "get_code_example",
-                        "description": "Get specific code examples for a task or concept. Returns well-formatted code with explanations.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "query": {
-                                    "type": "string",
-                                    "description": "What you want to do (e.g., 'initialize Hedera client', 'create React hook')"
-                                },
-                                "limit": {
-                                    "type": "integer",
-                                    "description": "Max examples (default: 3)",
-                                    "default": 3
-                                }
-                            },
-                            "required": ["query"]
-                        }
-                    },
-                    {
                         "name": "scrape_url",
-                        "description": "Scrape a webpage and store it in the knowledge base. Extracts structured content including code blocks and topics.",
+                        "description": (
+                            "Call this whenever the user provides a URL, mentions a specific "
+                            "docs page, or asks about content from a specific website. "
+                            "Always use this instead of recalling web content from memory. "
+                            "Fetches live content and stores it for future searches."
+                        ),
                         "inputSchema": {
                             "type": "object",
                             "properties": {
@@ -314,35 +272,70 @@ class ProductionMCPServer:
                                     "type": "string",
                                     "description": "The URL to scrape"
                                 },
-                                "max_depth": {
-                                    "type": "integer",
-                                    "description": "Maximum crawl depth (default: 0)",
-                                    "default": 0
+                                "mode": {
+                                    "type": "string",
+                                    "enum": ["smart", "ultrafast", "selenium"],
+                                    "default": "smart"
                                 }
                             },
                             "required": ["url"]
+                        }
+                    },
+                    {
+                        "name": "search_docs",
+                        "description": (
+                            "Search only previously scraped documentation. Use when the user "
+                            "wants to find something in docs that were already fetched. "
+                            "Use search_and_get instead if unsure."
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string"},
+                                "limit": {"type": "integer", "default": 10}
+                            },
+                            "required": ["query"]
+                        }
+                    },
+                    {
+                        "name": "search_code",
+                        "description": (
+                            "Search for code examples and snippets in the indexed codebase. "
+                            "Use when the user asks for code samples, examples, or 'show me "
+                            "how to implement X'."
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string"},
+                                "language": {"type": "string"},
+                                "limit": {"type": "integer", "default": 5}
+                            },
+                            "required": ["query"]
                         }
                     },
                     {
                         "name": "list_docs",
-                        "description": "List all URLs in the knowledge base",
+                        "description": "List all documents that have been scraped and stored.",
                         "inputSchema": {
                             "type": "object",
-                            "properties": {}
+                            "properties": {
+                                "limit": {"type": "integer", "default": 20}
+                            }
                         }
                     },
                     {
                         "name": "get_doc",
-                        "description": "Get full documentation content by URL",
+                        "description": "Retrieve the full content of a specific stored document by URL or ID.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
-                                "url": {
+                                "identifier": {
                                     "type": "string",
-                                    "description": "The exact URL of the document"
+                                    "description": "URL or document ID"
                                 }
                             },
-                            "required": ["url"]
+                            "required": ["identifier"]
                         }
                     }
                 ]

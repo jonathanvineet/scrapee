@@ -378,33 +378,143 @@ class SQLiteStore:
         
         return [dict(row) for row in cursor.fetchall()]
     
+    def search_with_snippets(self, query: str, limit: int = 5) -> List[Dict]:
+        """
+        FTS5 search with highlighted snippets — use this instead of TF-IDF.
+        
+        Args:
+            query: Search query
+            limit: Maximum results to return
+        
+        Returns:
+            List of dicts with url, title, snippet, rank
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                SELECT 
+                    d.url,
+                    d.title,
+                    snippet(docs_fts, 1, '[', ']', '...', 30) as snippet,
+                    rank
+                FROM docs d
+                JOIN docs_fts ON d.url = docs_fts.url
+                WHERE docs_fts MATCH ?
+                ORDER BY rank
+                LIMIT ?
+            """, (query, limit))
+            
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            print(f"[SQLiteStore] search_with_snippets error: {e}")
+            return []
+    
+    def search_code_with_context(self, query: str, language: str = None, limit: int = 5) -> List[Dict]:
+        """
+        Search code blocks with optional language filter.
+        
+        Args:
+            query: Search query
+            language: Optional programming language filter
+            limit: Maximum results
+        
+        Returns:
+            List of dicts with snippet, language, context, url, title
+        """
+        try:
+            cursor = self.conn.cursor()
+            
+            if language:
+                cursor.execute("""
+                    SELECT 
+                        c.snippet,
+                        c.language,
+                        c.context,
+                        c.url,
+                        d.title,
+                        snippet(code_fts, 0, '[', ']', '...', 20) as highlighted
+                    FROM code_fts
+                    JOIN code_blocks c ON code_fts.rowid = c.rowid
+                    JOIN docs d ON c.url = d.url
+                    WHERE code_fts MATCH ? AND c.language = ?
+                    ORDER BY rank
+                    LIMIT ?
+                """, (query, language, limit))
+            else:
+                cursor.execute("""
+                    SELECT 
+                        c.snippet,
+                        c.language,
+                        c.context,
+                        c.url,
+                        d.title,
+                        snippet(code_fts, 0, '[', ']', '...', 20) as highlighted
+                    FROM code_fts
+                    JOIN code_blocks c ON code_fts.rowid = c.rowid
+                    JOIN docs d ON c.url = d.url
+                    WHERE code_fts MATCH ?
+                    ORDER BY rank
+                    LIMIT ?
+                """, (query, limit))
+            
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            print(f"[SQLiteStore] search_code_with_context error: {e}")
+            return []
+    
     def get_stats(self) -> Dict:
         """
-        Get storage statistics.
+        Get storage statistics — used by health endpoint.
         
         Returns:
             Dict with counts and info
         """
-        cursor = self.conn.cursor()
+        try:
+            cursor = self.conn.cursor()
+            
+            cursor.execute("SELECT COUNT(*) as count FROM docs")
+            doc_count = cursor.fetchone()["count"]
+            
+            cursor.execute("SELECT COUNT(*) as count FROM code_blocks")
+            code_count = cursor.fetchone()["count"]
+            
+            cursor.execute("SELECT COUNT(DISTINCT domain) as count FROM docs")
+            domain_count = cursor.fetchone()["count"]
+            
+            cursor.execute("SELECT domain, COUNT(*) as count FROM docs GROUP BY domain ORDER BY count DESC LIMIT 5")
+            top_domains = [dict(row) for row in cursor.fetchall()]
+            
+            return {
+                "total_docs": doc_count,
+                "total_code_blocks": code_count,
+                "total_domains": domain_count,
+                "top_domains": top_domains
+            }
+        except Exception as e:
+            return {"total_docs": 0, "total_code_blocks": 0, "error": str(e)}
+    
+    def get_doc_by_url(self, url: str) -> Optional[Dict]:
+        """
+        Fetch a single document by URL.
         
-        cursor.execute("SELECT COUNT(*) as count FROM docs")
-        doc_count = cursor.fetchone()["count"]
+        Args:
+            url: Document URL
         
-        cursor.execute("SELECT COUNT(*) as count FROM code_blocks")
-        code_count = cursor.fetchone()["count"]
-        
-        cursor.execute("SELECT COUNT(DISTINCT domain) as count FROM docs")
-        domain_count = cursor.fetchone()["count"]
-        
-        cursor.execute("SELECT domain, COUNT(*) as count FROM docs GROUP BY domain ORDER BY count DESC LIMIT 5")
-        top_domains = [dict(row) for row in cursor.fetchall()]
-        
-        return {
-            "total_docs": doc_count,
-            "total_code_blocks": code_count,
-            "total_domains": domain_count,
-            "top_domains": top_domains
-        }
+        Returns:
+            Dict with document data or None if not found
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "SELECT url, title, content, domain, language, scraped_at, metadata FROM docs WHERE url = ?",
+                (url,)
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        except Exception:
+            return None
     
     def _extract_domain(self, url: str) -> str:
         """Extract domain from URL."""

@@ -3,6 +3,8 @@ Enhanced Smart Scraper for Production MCP
 Extracts structured content including code blocks, topics, and metadata.
 """
 import re
+import asyncio
+import time
 from typing import Dict, List, Optional, Tuple
 from bs4 import BeautifulSoup, NavigableString
 from urllib.parse import urlparse
@@ -40,6 +42,34 @@ class SmartScraper:
     def __init__(self):
         """Initialize scraper."""
         pass
+    
+    def validate_url(self, url: str) -> Tuple[bool, str]:
+        """
+        Validate URL for scraping.
+        
+        Args:
+            url: URL to validate
+        
+        Returns:
+            (is_valid, reason)
+        """
+        try:
+            parsed = urlparse(url)
+            
+            if parsed.scheme not in ("http", "https"):
+                return False, "Only http/https URLs are supported"
+            
+            if not parsed.netloc:
+                return False, "Invalid URL — no domain found"
+            
+            # Block localhost/internal
+            blocked = ["localhost", "127.0.0.1", "0.0.0.0", "169.254"]
+            if any(b in parsed.netloc for b in blocked):
+                return False, "Internal URLs are not allowed"
+            
+            return True, "ok"
+        except Exception as e:
+            return False, str(e)
     
     def parse_html(self, html: str, url: str) -> Dict:
         """
