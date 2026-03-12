@@ -4,6 +4,7 @@ import requests
 import urllib3
 from collections import deque
 from urllib.parse import urlparse, urljoin, urldefrag
+import signal
 
 from bs4 import BeautifulSoup
 
@@ -23,10 +24,13 @@ class SmartCrawler:
     """
     Smart crawler — tries requests first, falls back to Selenium for JS-heavy pages.
     On Vercel (no Selenium), runs requests-only path.
+    Has built-in timeout protection for Vercel serverless limits.
     """
-    def __init__(self, start_url, max_depth=2):
+    def __init__(self, start_url, max_depth=2, timeout_limit=25):
         self.start_url = start_url.rstrip("/")
         self.max_depth = max_depth
+        self.timeout_limit = timeout_limit  # Vercel function timeout protection
+        self.start_time = time.time()
 
         parsed = urlparse(self.start_url)
         self.base_domain = parsed.netloc
@@ -102,6 +106,11 @@ class SmartCrawler:
         queue.append((self.start_url, 0))
 
         while queue:
+            # Check timeout
+            elapsed = time.time() - self.start_time
+            if elapsed > self.timeout_limit:
+                raise TimeoutError(f'Crawl exceeded timeout limit of {self.timeout_limit}s')
+
             current_url, depth = queue.popleft()
             current_url = self.clean_url(current_url)
 

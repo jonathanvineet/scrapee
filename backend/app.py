@@ -524,7 +524,7 @@ def scrape():
     try:
         data = request.get_json()
         if not data or 'urls' not in data:
-            return jsonify({'error': 'urls is required'}), 400
+            return jsonify({'error': 'urls is required', 'status': 'failed'}), 400
 
         urls = data.get('urls', [])
         mode = data.get('mode', 'smart')
@@ -532,59 +532,94 @@ def scrape():
         output_format = data.get('output_format', 'json')
 
         if not isinstance(urls, list) or len(urls) == 0:
-            return jsonify({'error': 'urls must be a non-empty list'}), 400
+            return jsonify({'error': 'urls must be a non-empty list', 'status': 'failed'}), 400
 
         all_results = []
 
         for start_url in urls:
             try:
+                # Validate URL format
+                if not start_url.startswith(('http://', 'https://')):
+                    all_results.append({'url': start_url, 'error': 'Invalid URL format - must start with http:// or https://', 'status': 'failed'})
+                    continue
+
                 if mode == 'fast':
                     if SeleniumCrawler is None:
-                        return jsonify({'error': f"SeleniumCrawler failed to import: {_import_errors.get('selenium_crawler')}"}), 500
+                        return jsonify({
+                            'error': f"SeleniumCrawler not available: {_import_errors.get('selenium_crawler', 'Unknown error')}",
+                            'status': 'failed'
+                        }), 422
                     crawler = SeleniumCrawler(start_url=start_url, max_depth=max_depth)
                 elif mode == 'pipeline':
                     if UltraFastCrawler is None:
-                        return jsonify({'error': f"UltraFastCrawler failed to import: {_import_errors.get('pipeline_crawler')}"}), 500
+                        return jsonify({
+                            'error': f"UltraFastCrawler not available: {_import_errors.get('pipeline_crawler', 'Unknown error')}",
+                            'status': 'failed'
+                        }), 422
                     crawler = UltraFastCrawler(start_url=start_url, max_depth=max_depth, max_workers=8)
                 else:  # smart (default)
                     if SmartCrawler is None:
-                        return jsonify({'error': f"SmartCrawler failed to import: {_import_errors.get('smart_crawler')}"}), 500
+                        return jsonify({
+                            'error': f"SmartCrawler not available: {_import_errors.get('smart_crawler', 'Unknown error')}",
+                            'status': 'failed'
+                        }), 422
                     crawler = SmartCrawler(start_url=start_url, max_depth=max_depth)
 
-                raw = crawler.crawl()  # {url: html, ...}
+                try:
+                    # Crawling with timeout protection (Vercel function timeout is ~30s)
+                    raw = crawler.crawl()  # {url: html, ...}
+                    
+                    if not raw:
+                        all_results.append({'url': start_url, 'error': 'No content scraped from URL', 'status': 'failed'})
+                        continue
 
-                for page_url, html in raw.items():
-                    parsed = parse_html(page_url, html, mode)
-                    all_results.append(parsed)
-                    
-                    # Store in history for API access
-                    _history[page_url] = parsed
-                    
-                    # Build content text for MCP server
-                    content_text = parsed.get('title', '') + "\n\n"
-                    for p in parsed.get('paragraphs', [])[:20]:
-                        content_text += p + "\n"
-                    
-                    # Save to Redis (with memory fallback)
-                    save_page(page_url, content_text, metadata=parsed)
+                    for page_url, html in raw.items():
+                        if not html:
+                            all_results.append({'url': page_url, 'error': 'Empty response from URL', 'status': 'failed'})
+                            continue
+                            
+                        parsed = parse_html(page_url, html, mode)
+                        all_results.append(parsed)
+                        
+                        # Store in history for API access
+                        _history[page_url] = parsed
+                        
+                        # Build content text for MCP server
+                        content_text = parsed.get('title', '') + "\n\n"
+                        for p in parsed.get('paragraphs', [])[:20]:
+                            content_text += p + "\n"
+                        
+                        # Save to Redis (with memory fallback)
+                        save_page(page_url, content_text, metadata=parsed)
+                        
+                except TimeoutError as te:
+                    all_results.append({'url': start_url, 'error': f'Request timeout: {str(te)}', 'status': 'timeout'})
+                except Exception as crawl_err:
+                    all_results.append({'url': start_url, 'error': f'Crawl failed: {str(crawl_err)}', 'status': 'failed'})
 
             except RuntimeError as e:
                 # Selenium not available in this environment
-                return jsonify({'error': str(e)}), 422
+                all_results.append({'url': start_url, 'error': str(e), 'status': 'error'})
             except Exception as e:
-                all_results.append({'url': start_url, 'error': str(e)})
+                all_results.append({'url': start_url, 'error': str(e), 'status': 'error'})
 
         return jsonify({
-            'status': 'success',
+            'status': 'success' if any(r.get('status') != 'failed' for r in all_results if 'status' in r) else 'partial',
             'mode': mode,
             'urls_processed': len(urls),
-            'pages_scraped': len(all_results),
+            'pages_scraped': len([r for r in all_results if 'error' not in r]),
             'output_format': output_format,
             'data': all_results
         }), 200
 
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        import traceback
+        error_trace = traceback.format_exc()
+        return jsonify({
+            'error': str(e),
+            'status': 'failed',
+            'trace': error_trace if os.getenv('FLASK_ENV') != 'production' else None
+        }), 500
 
 
 @app.route('/api/scrape/validate-urls', methods=['POST'])
