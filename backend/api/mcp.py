@@ -14,9 +14,9 @@ from datetime import datetime, timedelta
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from storage.sqlite_store import get_sqlite_store
-from index.vector_search import get_search_engine
+# from index.vector_search import get_search_engine  # Disabled for Vercel deployment
 from utils.normalize import normalize_url
-from smart_scraper import create_scraper
+# from smart_scraper import create_scraper  # Disabled for Vercel deployment
 
 # Import crawler
 try:
@@ -148,15 +148,17 @@ class ProductionMCPServer:
             use_sqlite: Use SQLite storage (recommended for production)
         """
         self.store = get_sqlite_store() if use_sqlite else None
-        self.search = get_search_engine()
-        self.scraper = create_scraper()
+        # self.search = get_search_engine()  # Disabled for Vercel deployment
+        # self.scraper = create_scraper()  # Disabled for Vercel deployment
+        self.search = None
+        self.scraper = None
         self.cache = CacheLayer(ttl_seconds=300)
         self.version = "2.0.0"
         self.name = "scrapee-production"
         
         print(f"✓ Production MCP Server initialized")
         print(f"  - SQLite: {'enabled' if use_sqlite else 'disabled'}")
-        print(f"  - Security: domain allowlist active")
+        print(f"  - Search: disabled (lightweight deployment)")
         print(f"  - Caching: 5-minute TTL")
     
     def handle_request(self, data: Dict) -> Dict:
