@@ -82,6 +82,21 @@ except Exception as e:
 
 app = Flask(__name__)
 
+# Enable CORS for all routes
+CORS(app, resources={
+    r"/api/*": {
+        "origins": ["*"],
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"],
+        "expose_headers": ["Content-Type"]
+    },
+    r"/mcp*": {
+        "origins": ["*"],
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type"]
+    }
+})
+
 # Global history storage for scraped pages (keyed by URL)
 _history = {}
 SCRAPED_PAGES = {}  # For MCP server (fallback if Redis unavailable)
@@ -471,10 +486,14 @@ def debug_scrape():
     return jsonify({'trace': trace}), 200
 
 
-@app.route('/api/health', methods=['GET'])
+@app.route('/api/health', methods=['GET', 'OPTIONS'])
 def health():
+    """Health check endpoint."""
+    if request.method == 'OPTIONS':
+        return '', 204
+    
     return jsonify({
-        'status': 'ok',
+        'status': 'healthy',
         'message': 'Scrapee API is running',
         'import_errors': _import_errors,
         'crawlers': {
@@ -485,7 +504,7 @@ def health():
     }), 200
 
 
-@app.route('/api/scrape', methods=['POST'])
+@app.route('/api/scrape', methods=['POST', 'OPTIONS'])
 def scrape():
     """
     POST /api/scrape
@@ -500,6 +519,8 @@ def scrape():
       smart    → SmartCrawler (requests first, Selenium fallback for JS-heavy pages)
       pipeline → UltraFastCrawler (threaded, requests first, Selenium fallback)
     """
+    if request.method == 'OPTIONS':
+        return '', 204
     try:
         data = request.get_json()
         if not data or 'urls' not in data:
