@@ -36,6 +36,10 @@ class SmartScraper:
         'yaml': [r'^\s*\w+:', r'\.yml\b', r'\.yaml\b'],
         'docker': [r'\bFROM\b', r'\bRUN\b', r'\bCOPY\b', r'Dockerfile'],
     }
+
+    MAX_CONTENT_LENGTH = 100000
+    MAX_CODE_BLOCKS = 200
+    MAX_TOPICS = 200
     
     def __init__(self):
         """Initialize scraper."""
@@ -52,7 +56,7 @@ class SmartScraper:
         Returns:
             Dict with content, code_blocks, topics, metadata
         """
-        soup = BeautifulSoup(html, 'html.parser')
+        soup = BeautifulSoup(html or '', 'html.parser')
         
         # Remove unwanted elements
         for element in soup(['script', 'style', 'nav', 'footer', 'header', 'iframe']):
@@ -98,16 +102,23 @@ class SmartScraper:
         og_title = soup.find('meta', property='og:title')
         if og_title and og_title.get('content'):
             metadata["og_title"] = og_title['content']
+            metadata.setdefault("title", og_title['content'])
         
         og_desc = soup.find('meta', property='og:description')
         if og_desc and og_desc.get('content'):
             metadata["og_description"] = og_desc['content']
+            metadata.setdefault("description", og_desc['content'])
         
         # Language
         html_tag = soup.find('html')
         if html_tag and html_tag.get('lang'):
             metadata["language"] = html_tag['lang']
         
+        if not metadata.get("title"):
+            first_heading = soup.find(['h1', 'h2'])
+            if first_heading:
+                metadata["title"] = first_heading.get_text(strip=True)
+
         return metadata
     
     def _extract_code_blocks(self, soup: BeautifulSoup, url: str) -> List[Dict]:
@@ -118,11 +129,12 @@ class SmartScraper:
             List of dicts with snippet, language, context
         """
         code_blocks = []
+        seen = set()
         
         # Find all code elements
         code_elements = soup.find_all(['code', 'pre'])
         
-        for idx, element in enumerate(code_elements):
+        for idx, element in enumerate(code_elements[:self.MAX_CODE_BLOCKS]):
             # Get code text
             code_text = element.get_text()
             
@@ -131,15 +143,21 @@ class SmartScraper:
                 continue
             
             # Detect language
-            language = self._detect_language(element, code_text)
+            language = self._normalize_language(self._detect_language(element, code_text))
             
             # Extract context (surrounding text)
             context = self._extract_context(element)
             
+            snippet = code_text.strip()
+            fingerprint = (snippet, language, context)
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+
             code_blocks.append({
-                "snippet": code_text.strip(),
+                "snippet": snippet[:5000],
                 "language": language,
-                "context": context,
+                "context": context[:400],
                 "line_number": idx + 1
             })
         
@@ -187,6 +205,18 @@ class SmartScraper:
             return max(scores.items(), key=lambda x: x[1])[0]
         
         return "unknown"
+
+    def _normalize_language(self, language: str) -> str:
+        aliases = {
+            'js': 'javascript',
+            'ts': 'typescript',
+            'py': 'python',
+            'shell': 'bash',
+            'sh': 'bash',
+            'yml': 'yaml',
+        }
+        value = (language or 'unknown').strip().lower()
+        return aliases.get(value, value or 'unknown')
     
     def _extract_context(self, element, max_chars: int = 200) -> str:
         """
@@ -228,11 +258,12 @@ class SmartScraper:
             List of dicts with topic, heading, level, content
         """
         topics = []
+        seen = set()
         
         # Find all headings
         headings = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
         
-        for heading in headings:
+        for heading in headings[:self.MAX_TOPICS]:
             level = int(heading.name[1])  # h1 -> 1, h2 -> 2, etc.
             heading_text = heading.get_text(strip=True)
             
@@ -255,6 +286,11 @@ class SmartScraper:
             # Generate topic slug
             topic = re.sub(r'[^a-z0-9]+', '-', heading_text.lower()).strip('-')
             
+            fingerprint = (topic, heading_text)
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+
             topics.append({
                 "topic": topic,
                 "heading": heading_text,
@@ -278,7 +314,7 @@ class SmartScraper:
         text = re.sub(r'\n\s*\n+', '\n\n', text)
         text = re.sub(r' +', ' ', text)
         
-        return text.strip()
+        return text.strip()[:self.MAX_CONTENT_LENGTH]
 
 
 # Factory function
