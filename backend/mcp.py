@@ -104,15 +104,17 @@ class MCPServer:
 
     # Heuristics: map common topic keywords to likely doc domains for auto-ingestion
     DOMAIN_HINTS: Dict[str, str] = {
-        "pipeline": "https://docs.python.org/3/library/subprocess.html",
-        "hedera": "https://docs.hedera.com/hedera/getting-started",
         "python": "https://docs.python.org/3/",
         "react": "https://react.dev/learn",
         "nextjs": "https://nextjs.org/docs",
         "fastapi": "https://fastapi.tiangolo.com/",
         "flask": "https://flask.palletsprojects.com/",
         "sqlite": "https://www.sqlite.org/docs.html",
-        "mcp": "https://spec.modelcontextprotocol.io/specification/",
+        "docker": "https://docs.docker.com",
+        "kubernetes": "https://kubernetes.io/docs",
+        "solana": "https://solana.com/docs",
+        "hedera": "https://docs.hedera.com",
+        "rust": "https://doc.rust-lang.org",
     }
 
     def __init__(self):
@@ -121,6 +123,27 @@ class MCPServer:
         self.cache = CacheLayer(ttl_seconds=300)
         self.name = SERVER_NAME
         self.version = SERVER_VERSION
+        
+        # Bootstrap essential documentation on startup (in a background thread)
+        threading.Thread(target=self._bootstrap_docs, daemon=True).start()
+
+    def _bootstrap_docs(self):
+        """Preload key documentation if not already in the index."""
+        bootstrap_sources = [
+            "https://docs.python.org/3/",
+            "https://react.dev/learn",
+            "https://fastapi.tiangolo.com/",
+        ]
+        
+        for url in bootstrap_sources:
+            try:
+                # Need to strip the URL since get_doc expects an exact match
+                if not self.store.get_doc(url) and not self.store.get_doc(url.rstrip("/")):
+                    print(f"[MCP] Bootstrapping documentation: {url}")
+                    # Run synchronously in the background thread
+                    self._tool_scrape_url({"url": url, "mode": "smart", "max_depth": 1})
+            except Exception as e:
+                print(f"[MCP] Failed to bootstrap {url}: {e}")
 
     # ------------------------------------------------------------------ #
     # Public entry point                                                    #
@@ -524,7 +547,8 @@ class MCPServer:
             if seed_url:
                 print(f"[MCP] auto-ingesting {seed_url} for query: {query!r}")
                 try:
-                    self._tool_scrape_url({"url": seed_url, "mode": "smart", "max_depth": 1})
+                    # Use depth=2 for initial ingestion as per requirements
+                    self._tool_scrape_url({"url": seed_url, "mode": "smart", "max_depth": 2})
                     results = self.store.search_and_get(query, limit=limit, snippet_length=snippet_length)
                 except Exception as exc:
                     print(f"[MCP] auto-ingest failed: {exc}")
@@ -656,18 +680,27 @@ class MCPServer:
     def _detect_doc_domain(self, query: str) -> Optional[str]:
         """Return a seed URL to scrape for a given query, or None."""
         q = query.lower()
+        
+        # Exact keyword match
         for keyword, url in self.DOMAIN_HINTS.items():
             if keyword in q:
                 return url
+                
+        # Fuzzy match tokens e.g. "react hooks"
+        words = set(re.findall(r"[a-z0-9]+", q))
+        for keyword, url in self.DOMAIN_HINTS.items():
+            if keyword in words:
+                return url
+
         # Generic fallback: try to extract a domain-like token from the query
         # e.g. "django orm" → try "https://docs.djangoproject.com/"
-        words = re.findall(r"[a-z][a-z0-9]+", q)
-        for word in words:
-            if len(word) > 4:
-                candidate = f"https://docs.{word}.com/"
-                is_valid, _ = self._validate_scrape_url(candidate)
-                if is_valid:
-                    return candidate
+        long_words = [w for w in words if len(w) > 4]
+        for word in long_words:
+            candidate = f"https://docs.{word}.com/"
+            is_valid, _ = self._validate_scrape_url(candidate)
+            if is_valid:
+                return candidate
+                
         return None
 
     # ------------------------------------------------------------------ #

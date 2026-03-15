@@ -3,8 +3,15 @@ import json
 import os
 import re
 import sqlite3
+import threading
 from datetime import datetime
 from typing import Dict, List, Optional
+
+try:
+    import redis
+    REDIS_AVAILABLE = True
+except ImportError:
+    REDIS_AVAILABLE = False
 
 
 def _running_on_vercel() -> bool:
@@ -50,6 +57,24 @@ class SQLiteStore:
         """
         self.db_path = db_path or _default_db_path()
         _ensure_parent_dir(self.db_path)
+        
+        self.redis_client = None
+        self._sync_lock = threading.Lock()
+        
+        # Initialize Redis if configured
+        if REDIS_AVAILABLE:
+            redis_url = os.getenv("REDIS_URL") or os.getenv("KV_URL")
+            if redis_url:
+                try:
+                    self.redis_client = redis.from_url(redis_url, socket_timeout=5)
+                    self.redis_client.ping()
+                    print("✓ Redis connected for SQLite persistence")
+                except Exception as e:
+                    print(f"⚠ Redis connection failed: {e}")
+                    self.redis_client = None
+        
+        # Attempt to pull remote DB before opening Local SQLite
+        self._pull_from_redis()
 
         try:
             self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
@@ -70,7 +95,41 @@ class SQLiteStore:
         self.conn.execute("PRAGMA synchronous = NORMAL")
         self._init_schema()
         print(f"✓ SQLite initialized: {self.db_path}")
-    
+
+    def _pull_from_redis(self):
+        """Download the SQLite database from Redis to the local filesystem."""
+        if not self.redis_client or self.db_path == ":memory:":
+            return
+        
+        try:
+            data = self.redis_client.get("scrapee:sqlite:db")
+            if data:
+                with open(self.db_path, "wb") as f:
+                    f.write(data)
+                print(f"✓ Pulled SQLite database from Redis ({len(data)} bytes)")
+            else:
+                print("ℹ No existing SQLite database found in Redis")
+        except Exception as e:
+            print(f"⚠ Failed to pull DB from Redis: {e}")
+
+    def _push_to_redis(self):
+        """Upload the current SQLite database to Redis."""
+        if not self.redis_client or self.db_path == ":memory:":
+            return
+            
+        def _upload():
+            with self._sync_lock:
+                try:
+                    with open(self.db_path, "rb") as f:
+                        data = f.read()
+                    self.redis_client.set("scrapee:sqlite:db", data)
+                    print(f"✓ Pushed SQLite database to Redis ({len(data)} bytes)")
+                except Exception as e:
+                    print(f"⚠ Failed to push DB to Redis: {e}")
+                    
+        # Run in background to avoid blocking the main thread
+        threading.Thread(target=_upload, daemon=True).start()
+
     def _init_schema(self):
         """Create or migrate the schema to the rowid-backed FTS layout."""
         if self._needs_migration():
@@ -313,6 +372,9 @@ class SQLiteStore:
                 )
             
             self.conn.commit()
+            
+            # Persist to Redis
+            self._push_to_redis()
             return True
             
         except Exception as e:
@@ -391,6 +453,10 @@ class SQLiteStore:
         """
         cursor = self.conn.cursor()
         prepared_query = self._prepare_fts_query(query)
+        like_query = f"%{query}%"
+        
+        # FTS5 MATCH cannot be combined with OR on external tables directly in SQLite.
+        # We run the FTS query first.
         cursor.execute(
             """
             SELECT
@@ -407,7 +473,35 @@ class SQLiteStore:
             """,
             (prepared_query, limit),
         )
-        return [dict(row) for row in cursor.fetchall()]
+        results = [dict(row) for row in cursor.fetchall()]
+        
+        # Fallback to LIKE if FTS yields fewer results than limit
+        if len(results) < limit:
+            remaining = limit - len(results)
+            exclude_ids = [r["id"] for r in results]
+            placeholders = ",".join("?" for _ in exclude_ids)
+            
+            if exclude_ids:
+                sql = f"""
+                    SELECT id, url, title, substr(content, 1, 200) AS snippet, 0.0 AS score
+                    FROM docs
+                    WHERE (title LIKE ? OR content LIKE ?)
+                      AND id NOT IN ({placeholders})
+                    LIMIT ?
+                """
+                cursor.execute(sql, (like_query, like_query, *exclude_ids, remaining))
+            else:
+                sql = """
+                    SELECT id, url, title, substr(content, 1, 200) AS snippet, 0.0 AS score
+                    FROM docs
+                    WHERE (title LIKE ? OR content LIKE ?)
+                    LIMIT ?
+                """
+                cursor.execute(sql, (like_query, like_query, remaining))
+                
+            results.extend([dict(row) for row in cursor.fetchall()])
+            
+        return results
 
     def search_and_get(self, query: str, limit: int = 5, snippet_length: int = 400) -> List[Dict]:
         results = self.search_docs(query, limit=limit)
@@ -440,12 +534,16 @@ class SQLiteStore:
         """
         cursor = self.conn.cursor()
         prepared_query = self._prepare_fts_query(query)
+        like_query = f"%{query}%"
+
+        results = []
         if language:
             cursor.execute(
                 """
                 SELECT
                     d.url,
                     d.title,
+                    c.id,
                     c.snippet,
                     c.language,
                     c.context,
@@ -466,6 +564,7 @@ class SQLiteStore:
                 SELECT
                     d.url,
                     d.title,
+                    c.id,
                     c.snippet,
                     c.language,
                     c.context,
@@ -480,8 +579,63 @@ class SQLiteStore:
                 """,
                 (prepared_query, limit),
             )
+        results = [dict(row) for row in cursor.fetchall()]
+
+        if len(results) < limit:
+            remaining = limit - len(results)
+            exclude_ids = [r["id"] for r in results]
+            placeholders = ",".join("?" for _ in exclude_ids)
+            
+            if language:
+                if exclude_ids:
+                    sql = f"""
+                        SELECT d.url, d.title, c.id, c.snippet, c.language, c.context, substr(c.snippet, 1, 100) AS highlighted, 0.0 AS score
+                        FROM code_blocks c
+                        JOIN docs d ON c.doc_id = d.id
+                        WHERE (c.snippet LIKE ? OR c.context LIKE ?)
+                          AND c.language = ?
+                          AND c.id NOT IN ({placeholders})
+                        LIMIT ?
+                    """
+                    cursor.execute(sql, (like_query, like_query, language, *exclude_ids, remaining))
+                else:
+                    sql = """
+                        SELECT d.url, d.title, c.id, c.snippet, c.language, c.context, substr(c.snippet, 1, 100) AS highlighted, 0.0 AS score
+                        FROM code_blocks c
+                        JOIN docs d ON c.doc_id = d.id
+                        WHERE (c.snippet LIKE ? OR c.context LIKE ?)
+                          AND c.language = ?
+                        LIMIT ?
+                    """
+                    cursor.execute(sql, (like_query, like_query, language, remaining))
+            else:
+                if exclude_ids:
+                    sql = f"""
+                        SELECT d.url, d.title, c.id, c.snippet, c.language, c.context, substr(c.snippet, 1, 100) AS highlighted, 0.0 AS score
+                        FROM code_blocks c
+                        JOIN docs d ON c.doc_id = d.id
+                        WHERE (c.snippet LIKE ? OR c.context LIKE ?)
+                          AND c.id NOT IN ({placeholders})
+                        LIMIT ?
+                    """
+                    cursor.execute(sql, (like_query, like_query, *exclude_ids, remaining))
+                else:
+                    sql = """
+                        SELECT d.url, d.title, c.id, c.snippet, c.language, c.context, substr(c.snippet, 1, 100) AS highlighted, 0.0 AS score
+                        FROM code_blocks c
+                        JOIN docs d ON c.doc_id = d.id
+                        WHERE (c.snippet LIKE ? OR c.context LIKE ?)
+                        LIMIT ?
+                    """
+                    cursor.execute(sql, (like_query, like_query, remaining))
+
+            results.extend([dict(row) for row in cursor.fetchall()])
         
-        return [dict(row) for row in cursor.fetchall()]
+        # Remove 'id' from result dicts before returning to avoid confusing clients
+        for r in results:
+            r.pop("id", None)
+            
+        return results
     
     def get_code_examples(self, query: str, limit: int = 5) -> List[Dict]:
         """

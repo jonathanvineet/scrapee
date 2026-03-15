@@ -81,7 +81,7 @@ class SmartScraper:
         "docker": [r"\bFROM\b", r"\bRUN\b", r"\bCOPY\b", r"Dockerfile"],
     }
 
-    MAX_CONTENT_LENGTH = 100_000
+    MAX_CONTENT_LENGTH = 1_000_000
     MAX_CODE_BLOCKS = 200
     MAX_TOPICS = 200
 
