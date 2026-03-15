@@ -667,6 +667,24 @@ class SQLiteStore:
         parsed = urlparse(url)
         return parsed.netloc or ""
     
+    # ------------------------------------------------------------------ #
+    # Spec-compliance aliases (MCP §4)                                      #
+    # ------------------------------------------------------------------ #
+
+    def search_with_snippets(self, query: str, limit: int = 10) -> List[Dict]:
+        """Alias for search_docs() — returns results with FTS5 snippets.
+
+        Required by MCP spec §4 search_with_snippets().
+        """
+        return self.search_docs(query, limit=limit)
+
+    def search_code_with_context(self, query: str, language: str = None, limit: int = 10) -> List[Dict]:
+        """Alias for search_code() — returns code blocks with surrounding context.
+
+        Required by MCP spec §4 search_code_with_context().
+        """
+        return self.search_code(query, language=language, limit=limit)
+
     def close(self):
         """Close database connection."""
         if self.conn:
