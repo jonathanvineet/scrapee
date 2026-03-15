@@ -7,6 +7,37 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 
+def _running_on_vercel() -> bool:
+    return bool(
+        os.getenv("VERCEL")
+        or os.getenv("VERCEL_ENV")
+        or os.getenv("NOW_REGION")
+        or os.getenv("VERCEL_REGION")
+    )
+
+
+def _default_db_path() -> str:
+    override = os.getenv("SCRAPEE_SQLITE_PATH") or os.getenv("SQLITE_DB_PATH")
+    if override:
+        return override
+
+    if _running_on_vercel():
+        return os.path.join("/tmp", "scrapee", "docs.db")
+
+    backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(backend_dir, "db", "docs.db")
+
+
+def _ensure_parent_dir(db_path: str) -> None:
+    if not db_path or db_path == ":memory:":
+        return
+    if db_path.startswith("file:"):
+        return
+    parent = os.path.dirname(db_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+
 class SQLiteStore:
     """SQLite-backed storage for documents, topics, and code blocks."""
     
@@ -17,21 +48,28 @@ class SQLiteStore:
         Args:
             db_path: Path to SQLite database file (default: backend/db/docs.db)
         """
-        if db_path is None:
-            # Default path relative to backend directory
-            backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            db_dir = os.path.join(backend_dir, "db")
-            os.makedirs(db_dir, exist_ok=True)
-            db_path = os.path.join(db_dir, "docs.db")
-        
-        self.db_path = db_path
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        self.db_path = db_path or _default_db_path()
+        _ensure_parent_dir(self.db_path)
+
+        try:
+            self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        except sqlite3.OperationalError:
+            fallback_path = os.path.join("/tmp", "scrapee", "docs.db")
+            if self.db_path != fallback_path:
+                self.db_path = fallback_path
+                _ensure_parent_dir(self.db_path)
+                self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            else:
+                self.db_path = ":memory:"
+                self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
-        self.conn.execute("PRAGMA journal_mode = WAL")
+        if self.db_path != ":memory:":
+            self.conn.execute("PRAGMA journal_mode = WAL")
         self.conn.execute("PRAGMA synchronous = NORMAL")
         self._init_schema()
-        print(f"✓ SQLite initialized: {db_path}")
+        print(f"✓ SQLite initialized: {self.db_path}")
     
     def _init_schema(self):
         """Create or migrate the schema to the rowid-backed FTS layout."""
