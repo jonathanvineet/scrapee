@@ -1,18 +1,14 @@
-"""Compatibility shim for deployments that still point at backend/api/mcp.py."""
-import os
-import sys
+"""Compatibility shim for MCP access via HTTP and stdio."""
+
+from __future__ import annotations
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
+from mcp_server.protocol import MCPProtocolServer
 
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-BACKEND_DIR = os.path.dirname(CURRENT_DIR)
-if BACKEND_DIR not in sys.path:
-    sys.path.insert(0, BACKEND_DIR)
 
-from mcp import mcp_server
-
+protocol_server = MCPProtocolServer()
 
 app = Flask(__name__)
 CORS(app)
@@ -20,29 +16,32 @@ CORS(app)
 
 @app.route("/api/mcp", methods=["POST"])
 def mcp_endpoint():
-    data = request.get_json(silent=True)
-    if data is None:
-        return jsonify(
-            {
-                "jsonrpc": "2.0",
-                "error": {"code": -32700, "message": "Parse error"},
-            }
-        ), 400
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return (
+            jsonify(
+                {
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32700, "message": "Parse error"},
+                    "id": None,
+                }
+            ),
+            400,
+        )
 
-    response = mcp_server.handle_request(data)
+    response = protocol_server.handle_envelope(payload)
     if response is None:
         return "", 204
     return jsonify(response)
 
 
 @app.route("/api/health", methods=["GET"])
-def health_check():
-    stats = mcp_server.store.get_stats()
-    return jsonify(
-        {
-            "status": "ok" if stats.get("sqlite_ok") else "degraded",
-            "storage": "sqlite",
-            "docs": stats.get("total_docs", 0),
-            "code_blocks": stats.get("total_code_blocks", 0),
-        }
-    )
+def health():
+    stats = protocol_server.store.stats()
+    return jsonify({"status": "ok", "storage": "sqlite", "stats": stats})
+
+
+if __name__ == "__main__":
+    from mcp_server.server import main
+
+    raise SystemExit(main())

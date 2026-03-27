@@ -1,66 +1,62 @@
-# Scrapee - Production MCP Documentation Assistant
-
-Production-grade Model Context Protocol (MCP) server for AI agents (GitHub Copilot, Cursor, ChatGPT).
-
-## What It Does
-
-Ask GitHub Copilot: "How do I create a Hedera token?"
-
-The MCP automatically:
-1. Searches documentation
-2. Finds code examples
-3. Returns results to Copilot
-4. Copilot writes the code
-
-**No manual tool invocation needed!**
-
-## Project Structure
-
+# Scrapee MCP Server (Production Rebuild)
+Local, production-grade MCP server for developer workflows with strict JSON-RPC 2.0 handling and a clean tools/resources split.
+## What this server supports
+- Full MCP lifecycle:
+  - `initialize`
+  - `tools/list`
+  - `tools/call`
+  - `resources/list`
+  - `resources/read`
+- Agent-friendly tools:
+  - `search_docs(query)`
+  - `get_document(uri|source_url)`
+  - `scrape_url(url, max_depth, max_pages)`
+  - `search_code(query, language?)`
+- Resource-first retrieval:
+  - `docs://...` for full document content
+  - `code://...` for code snippets
+- Structured ingestion:
+  - scraper retries + URL validation
+  - SQLite persistence + FTS search
+  - automatic ingestion when doc search misses
+## New architecture
 ```
 scrapee/
-├── backend/
-│   ├── api/mcp.py              # Production MCP Server
-│   ├── storage/sqlite_store.py # SQLite + FTS5
-│   ├── smart_scraper.py        # Code extraction
-│   └── requirements.txt
-├── .vscode/mcp.json            # MCP config
-├── MCP_README.md               # Complete docs
-├── start_mcp.py                # Quick start
-└── test_mcp_production.py      # Tests
+├── mcp_server/
+│   ├── server.py
+│   ├── protocol.py
+│   ├── config.py
+│   ├── tools/
+│   ├── resources/
+│   ├── storage/
+│   ├── scraper/
+│   └── ingestion/
+├── start_mcp.py
+└── test_mcp_production.py
 ```
-
-## Quick Start
-
+## Run (STDIO transport)
 ```bash
-# 1. Install
-cd backend && pip install -r requirements.txt
-
-# 2. Run
+python -m mcp_server.server
+```
+or
+```bash
 python start_mcp.py
-
-# 3. Test
+```
+## VS Code MCP config
+`.vscode/mcp.json`:
+```json
+{
+  "servers": {
+    "scrapee": {
+      "command": "python",
+      "args": ["-m", "mcp_server.server"]
+    }
+  },
+  "inputs": []
+}
+```
+## Validate locally
+```bash
 python test_mcp_production.py
 ```
-
-VS Code config already set in `.vscode/mcp.json` - just restart!
-
-## Features
-
-- SQLite with FTS5 indexing
-- Smart code extraction
-- Domain security allowlist
-- Response caching
-- Zero AI dependencies
-
-## Documentation
-
-See **[MCP_README.md](MCP_README.md)** for complete guide.
-
-## Support
-
-- Docs: [MCP_README.md](MCP_README.md)
-- Issues: [GitHub](https://github.com/jonathanvineet/scrapee/issues)
-
----
-
-Built with ❤️ for developers
+This runs deterministic end-to-end MCP flow checks and prints example JSON requests/responses.
