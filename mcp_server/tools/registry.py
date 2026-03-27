@@ -1,230 +1,326 @@
-"""MCP tools definitions and execution handlers."""
+"""
+Tool definitions and handlers.
+Descriptions are directive (tell the model WHEN to call)
+not descriptive (tell the model WHAT the tool does).
+"""
 
-from __future__ import annotations
+import json
+import logging
+from mcp_server.logging_utils import setup_logging
 
-from typing import Dict, List
-
-from mcp_server.config import SEARCH_DEFAULT_LIMIT
-from mcp_server.ingestion import IngestionService
-from mcp_server.storage import SQLiteStore
-from mcp_server.utils import clamp_int, normalize_source_url
+logger = setup_logging(__name__)
 
 
 class ToolRegistry:
-    """Defines and executes MCP tools with machine-friendly structured output."""
 
-    def __init__(self, store: SQLiteStore, ingestion: IngestionService):
+    def __init__(self, store, scraper, ingestion):
         self.store = store
+        self.scraper = scraper
         self.ingestion = ingestion
+
         self._handlers = {
-            "search_docs": self._search_docs,
-            "get_document": self._get_document,
-            "scrape_url": self._scrape_url,
-            "search_code": self._search_code,
+            "search_docs":    self._handle_search_docs,
+            "scrape_url":     self._handle_scrape_url,
+            "search_code":    self._handle_search_code,
+            "get_document":   self._handle_get_document,
+            "list_docs":      self._handle_list_docs,
         }
 
-    def list_tools(self) -> List[Dict[str, object]]:
+    # ─── Tool definitions ─────────────────────────────────────────────────────
+
+    def list_tools(self) -> list:
         return [
             {
                 "name": "search_docs",
+                # ✅ Directive: tells model WHEN not WHAT
                 "description": (
-                    "Search indexed documentation and return matching document resource URIs. "
-                    "If no matches are found, the server may auto-ingest relevant docs and retry."
+                    "ALWAYS call this first before answering any question about a library, "
+                    "API, framework, package, or 'how do I...' question. "
+                    "Never answer technical questions from training memory when this tool "
+                    "is available. Returns resource_uris — follow up with resources/read "
+                    "on each URI to get the full content before responding to the user."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string", "description": "Documentation search query."},
+                        "query": {
+                            "type": "string",
+                            "description": "The search query"
+                        },
                         "limit": {
                             "type": "integer",
-                            "minimum": 1,
-                            "maximum": 20,
-                            "default": SEARCH_DEFAULT_LIMIT,
-                            "description": "Maximum number of document matches.",
-                        },
+                            "description": "Max results to return",
+                            "default": 5
+                        }
                     },
-                    "required": ["query"],
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "get_document",
-                "description": (
-                    "Resolve a document by resource URI (docs://...) or source URL, and return "
-                    "metadata plus canonical document resource URI for resources/read."
-                ),
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "uri": {"type": "string", "description": "Document resource URI (docs://...)."},
-                        "source_url": {"type": "string", "description": "Original HTTP(S) URL for the document."},
-                    },
-                    "anyOf": [{"required": ["uri"]}, {"required": ["source_url"]}],
-                    "additionalProperties": False,
-                },
+                    "required": ["query"]
+                }
             },
             {
                 "name": "scrape_url",
                 "description": (
-                    "Scrape and ingest a URL into local storage, then return created document/code resource URIs."
+                    "Call this whenever the user provides a URL or asks about content "
+                    "from a specific page or website. Always use this instead of recalling "
+                    "web content from memory. After scraping, call search_docs to find "
+                    "relevant content from the freshly ingested page."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "url": {"type": "string", "description": "HTTP(S) URL to scrape and ingest."},
+                        "url": {
+                            "type": "string",
+                            "description": "The URL to scrape and index"
+                        },
                         "max_depth": {
                             "type": "integer",
-                            "minimum": 0,
-                            "maximum": 2,
-                            "default": 0,
-                            "description": "Internal-link crawl depth.",
+                            "description": "How many link levels deep to crawl",
+                            "default": 1
                         },
                         "max_pages": {
                             "type": "integer",
-                            "minimum": 1,
-                            "maximum": 30,
-                            "default": 10,
-                            "description": "Maximum pages to crawl.",
-                        },
+                            "description": "Max pages to crawl in one run",
+                            "default": 5
+                        }
                     },
-                    "required": ["url"],
-                    "additionalProperties": False,
-                },
+                    "required": ["url"]
+                }
             },
             {
                 "name": "search_code",
                 "description": (
-                    "Search indexed code snippets and return code:// resource URIs with linked docs:// URIs."
+                    "Call this when the user asks for code examples, implementation "
+                    "samples, or 'show me how to...' questions. Searches indexed code "
+                    "snippets extracted from scraped documentation. Returns resource_uris "
+                    "— follow up with resources/read to get the full snippet."
                 ),
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string", "description": "Code search query."},
-                        "language": {"type": "string", "description": "Optional language filter (e.g. python)."},
+                        "query": {
+                            "type": "string",
+                            "description": "What to search for in code"
+                        },
+                        "language": {
+                            "type": "string",
+                            "description": "Filter by programming language (optional)"
+                        },
                         "limit": {
                             "type": "integer",
-                            "minimum": 1,
-                            "maximum": 20,
-                            "default": SEARCH_DEFAULT_LIMIT,
-                            "description": "Maximum number of snippet matches.",
-                        },
+                            "default": 5
+                        }
                     },
-                    "required": ["query"],
-                    "additionalProperties": False,
-                },
+                    "required": ["query"]
+                }
             },
+            {
+                "name": "get_document",
+                "description": (
+                    "Retrieve full content of a specific document by its URI or URL. "
+                    "Use this when you have a resource URI from search_docs results "
+                    "and need the complete document text."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "identifier": {
+                            "type": "string",
+                            "description": "docs:// URI or source URL of the document"
+                        }
+                    },
+                    "required": ["identifier"]
+                }
+            },
+            {
+                "name": "list_docs",
+                "description": (
+                    "List all documents that have been scraped and stored. "
+                    "Use this when the user asks what documentation is available "
+                    "or wants to browse indexed content."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {"type": "integer", "default": 20}
+                    }
+                }
+            }
         ]
 
-    def call(self, name: str, arguments: Dict[str, object]) -> Dict[str, object]:
+    # ─── Handlers ─────────────────────────────────────────────────────────────
+
+    def call(self, name: str, args: dict) -> dict:
         handler = self._handlers.get(name)
-        if handler is None:
-            raise ValueError(f"Unknown tool: {name}")
-        return handler(arguments)
+        if not handler:
+            return self._error(f"Unknown tool: {name}")
+        try:
+            return handler(args)
+        except Exception as e:
+            logger.exception(f"Tool error in {name}")
+            return self._error(str(e))
 
-    def _search_docs(self, arguments: Dict[str, object]) -> Dict[str, object]:
-        query = str(arguments.get("query", "")).strip()
+    def _handle_search_docs(self, args: dict) -> dict:
+        query = args.get("query", "").strip()
+        limit = int(args.get("limit", 5))
+
         if not query:
-            raise ValueError("search_docs requires a non-empty 'query'.")
-        limit = clamp_int(arguments.get("limit"), minimum=1, maximum=20, default=SEARCH_DEFAULT_LIMIT)
-        results = self.store.search_documents(query, limit=limit)
+            return self._error("'query' is required")
+
+        results = self.store.search_with_snippets(query, limit)
+
+        # Auto-ingest fallback — try to find and scrape something relevant
         auto_ingested = False
-        ingestion_result = None
         if not results:
-            ingestion_result = self.ingestion.auto_ingest_for_query(query)
-            if ingestion_result and ingestion_result.get("documents_ingested", 0) > 0:
-                auto_ingested = True
-                results = self.store.search_documents(query, limit=limit)
+            logger.info(f"No results for '{query}', attempting auto-ingest")
+            try:
+                self.ingestion.ingest_query(query)
+                results = self.store.search_with_snippets(query, limit)
+                auto_ingested = bool(results)
+            except Exception as e:
+                logger.warning(f"Auto-ingest failed: {e}")
 
-        payload = {
-            "query": query,
-            "total": len(results),
-            "documents": [
-                {
-                    "uri": row["uri"],
-                    "title": row.get("title") or row["source_url"],
-                    "source_url": row["source_url"],
-                    "snippet": row.get("snippet", ""),
-                    "score": row.get("score", 0.0),
-                }
-                for row in results
-            ],
-            "resource_uris": [row["uri"] for row in results],
-            "auto_ingested": auto_ingested,
-            "ingestion": ingestion_result,
-        }
-        return payload
+        resource_uris = [f"docs://{r['id']}" for r in results]
 
-    def _get_document(self, arguments: Dict[str, object]) -> Dict[str, object]:
-        uri = str(arguments.get("uri", "")).strip()
-        source_url = normalize_source_url(str(arguments.get("source_url", "")).strip())
-        document = None
-        if uri:
-            document = self.store.get_document_by_uri(uri)
-        elif source_url:
-            document = self.store.get_document_by_source_url(source_url)
-            if not document:
-                self.ingestion.ingest_url(source_url, max_depth=0, max_pages=5)
-                document = self.store.get_document_by_source_url(source_url)
-        else:
-            raise ValueError("get_document requires 'uri' or 'source_url'.")
-
-        if not document:
-            raise ValueError("Document was not found.")
-
-        payload = {
-            "document": {
-                "uri": document["uri"],
-                "source_url": document["source_url"],
-                "title": document.get("title", ""),
-                "content_length": len(document.get("content", "")),
-                "scraped_at": document.get("scraped_at", ""),
-                "updated_at": document.get("updated_at", ""),
-            },
-            "resource_uri": document["uri"],
-            "code_resource_uris": [snippet["uri"] for snippet in document.get("code_snippets", [])],
-        }
-        return payload
-
-    def _scrape_url(self, arguments: Dict[str, object]) -> Dict[str, object]:
-        raw_url = str(arguments.get("url", "")).strip()
-        if not raw_url:
-            raise ValueError("scrape_url requires non-empty 'url'.")
-        max_depth = clamp_int(arguments.get("max_depth"), minimum=0, maximum=2, default=0)
-        max_pages = clamp_int(arguments.get("max_pages"), minimum=1, maximum=30, default=10)
-        ingestion = self.ingestion.ingest_url(raw_url, max_depth=max_depth, max_pages=max_pages)
         return {
-            "start_url": ingestion["start_url"],
-            "documents_ingested": ingestion["documents_ingested"],
-            "document_resource_uris": ingestion["document_resource_uris"],
-            "code_resource_uris": ingestion["code_resource_uris"],
-            "errors": ingestion["errors"],
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps({
+                        "results": results,
+                        "resource_uris": resource_uris,
+                        # ✅ Agent knows what happened — prevents redundant calls
+                        "_meta": {
+                            "total": len(results),
+                            "query": query,
+                            "auto_ingested": auto_ingested,
+                            "hint": (
+                                "Call resources/read with each URI in resource_uris "
+                                "to get full document content."
+                            ) if results else (
+                                "No results found. Try scrape_url with a relevant "
+                                "documentation URL to ingest content first."
+                            )
+                        }
+                    }, indent=2)
+                }
+            ]
         }
 
-    def _search_code(self, arguments: Dict[str, object]) -> Dict[str, object]:
-        query = str(arguments.get("query", "")).strip()
+    def _handle_scrape_url(self, args: dict) -> dict:
+        url = args.get("url", "").strip()
+        if not url:
+            return self._error("'url' is required")
+
+        max_depth = int(args.get("max_depth", 1))
+        max_pages = int(args.get("max_pages", 5))
+
+        # Validate URL before scraping
+        valid, reason = self.scraper.validate_url(url)
+        if not valid:
+            return self._error(f"Invalid URL: {reason}")
+
+        try:
+            result = self.ingestion.ingest_url(url, max_depth=max_depth, max_pages=max_pages)
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps({
+                            "success": True,
+                            "url": url,
+                            "pages_ingested": result.get("pages_ingested", 0),
+                            "doc_ids": result.get("doc_ids", []),
+                            "_meta": {
+                                "hint": (
+                                    "Content has been indexed. "
+                                    "Now call search_docs to find relevant information."
+                                )
+                            }
+                        }, indent=2)
+                    }
+                ]
+            }
+        except Exception as e:
+            return self._error(f"Scrape failed: {e}")
+
+    def _handle_search_code(self, args: dict) -> dict:
+        query = args.get("query", "").strip()
+        language = args.get("language")
+        limit = int(args.get("limit", 5))
+
         if not query:
-            raise ValueError("search_code requires a non-empty 'query'.")
-        language = str(arguments.get("language", "")).strip().lower() or None
-        limit = clamp_int(arguments.get("limit"), minimum=1, maximum=20, default=SEARCH_DEFAULT_LIMIT)
-        rows = self.store.search_code(query, limit=limit, language=language)
+            return self._error("'query' is required")
+
+        results = self.store.search_code_with_context(query, language, limit)
+        resource_uris = [f"code://{r['id']}" for r in results]
 
         return {
-            "query": query,
-            "language": language,
-            "total": len(rows),
-            "matches": [
+            "content": [
                 {
-                    "uri": row["uri"],
-                    "document_uri": row["document_uri"],
-                    "source_url": row["source_url"],
-                    "title": row.get("title", ""),
-                    "language": row.get("language", "text"),
-                    "snippet": row.get("snippet", ""),
-                    "context": row.get("context", ""),
-                    "score": row.get("score", 0.0),
+                    "type": "text",
+                    "text": json.dumps({
+                        "results": results,
+                        "resource_uris": resource_uris,
+                        "_meta": {
+                            "total": len(results),
+                            "query": query,
+                            "language_filter": language
+                        }
+                    }, indent=2)
                 }
-                for row in rows
+            ]
+        }
+
+    def _handle_get_document(self, args: dict) -> dict:
+        identifier = args.get("identifier", "").strip()
+        if not identifier:
+            return self._error("'identifier' is required")
+
+        # Support both docs:// URI and raw URL
+        if identifier.startswith("docs://"):
+            doc_id = identifier.replace("docs://", "")
+            doc = self.store.get_doc_by_id(doc_id)
+        else:
+            doc = self.store.get_doc_by_url(identifier)
+
+        if not doc:
+            return self._error(f"Document not found: {identifier}")
+
+        return {
+            "content": [
+                {"type": "text", "text": json.dumps(doc, indent=2)}
+            ]
+        }
+
+    def _handle_list_docs(self, args: dict) -> dict:
+        limit = int(args.get("limit", 20))
+        docs = self.store.list_docs(limit=limit)
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps({
+                        "docs": docs,
+                        "total": len(docs),
+                        "_meta": {
+                            "hint": "Use get_document with a URI or search_docs to find specific content."
+                        }
+                    }, indent=2)
+                }
+            ]
+        }
+
+    def get_crawler_status(self) -> dict:
+        """Used by health endpoint."""
+        return {
+            "smart":     getattr(self.scraper, "smart_available", False),
+            "selenium":  getattr(self.scraper, "selenium_available", False),
+            "ultrafast": getattr(self.scraper, "ultrafast_available", False),
+        }
+
+    def _error(self, message: str) -> dict:
+        return {
+            "content": [
+                {"type": "text", "text": json.dumps({"error": message})}
             ],
-            "resource_uris": [row["uri"] for row in rows],
-            "document_resource_uris": sorted({row["document_uri"] for row in rows}),
+            "isError": True
         }

@@ -1,5 +1,4 @@
 """Production-grade local MCP server package."""
+from .protocol import MCPProtocol
 
-from .protocol import MCPProtocolServer
-
-__all__ = ["MCPProtocolServer"]
+__all__ = ["MCPProtocol"]

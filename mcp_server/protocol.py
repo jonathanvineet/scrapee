@@ -1,179 +1,165 @@
-"""JSON-RPC 2.0 + MCP lifecycle dispatcher."""
-
-from __future__ import annotations
+"""
+Strict JSON-RPC 2.0 dispatcher for MCP protocol.
+Validates envelope before routing to handlers.
+"""
 
 import json
-from dataclasses import dataclass
-from typing import Any, Dict
+import logging
+from typing import Any, Optional
 
-from mcp_server.config import ALLOWED_DOMAINS, DB_PATH, PROTOCOL_VERSION, SERVER_NAME, SERVER_VERSION
-from mcp_server.ingestion import IngestionService
-from mcp_server.logging_utils import get_logger
-from mcp_server.resources import ResourceRegistry
-from mcp_server.scraper import WebScraper
-from mcp_server.storage import SQLiteStore
-from mcp_server.tools import ToolRegistry
+from mcp_server.logging_utils import setup_logging
+
+logger = setup_logging(__name__)
 
 
-logger = get_logger(__name__)
+class MCPProtocol:
 
+    def __init__(self, tools, resources):
+        self.tools = tools
+        self.resources = resources
 
-@dataclass
-class _MethodContext:
-    request_id: Any
-    params: Dict[str, Any]
+        self._methods = {
+            "initialize":       self._handle_initialize,
+            "tools/list":       self._handle_tools_list,
+            "tools/call":       self._handle_tools_call,
+            "resources/list":   self._handle_resources_list,
+            "resources/read":   self._handle_resources_read,
+            "prompts/list":     self._handle_prompts_list,
+            "prompts/get":      self._handle_prompts_get,
+            "ping":             self._handle_ping,
+        }
 
+    # ─── Dispatcher ───────────────────────────────────────────────────────────
 
-class MCPProtocolServer:
-    """Production MCP server implementing core lifecycle methods."""
+    def dispatch(self, data: Any) -> Optional[dict]:
+        """
+        Validate JSON-RPC 2.0 envelope and route to handler.
+        Returns None for notifications (no id field).
+        """
+        if not isinstance(data, dict):
+            return self._error(None, -32700, "Parse error: expected JSON object")
 
-    def __init__(self, db_path: str = DB_PATH):
-        self.store = SQLiteStore(db_path=db_path)
-        self.scraper = WebScraper(allowed_domains=ALLOWED_DOMAINS or ())
-        self.ingestion = IngestionService(self.store, self.scraper)
-        self.tools = ToolRegistry(self.store, self.ingestion)
-        self.resources = ResourceRegistry(self.store)
+        # Strict JSON-RPC 2.0 check
+        if data.get("jsonrpc") != "2.0":
+            return self._error(
+                data.get("id"),
+                -32600,
+                "Invalid Request: 'jsonrpc' must be '2.0'"
+            )
 
-    # ------------------------------------------------------------------ #
-    # Public dispatch API
-    # ------------------------------------------------------------------ #
+        method = data.get("method")
+        if not method or not isinstance(method, str):
+            return self._error(
+                data.get("id"),
+                -32600,
+                "Invalid Request: 'method' must be a non-empty string"
+            )
 
-    def handle_envelope(self, payload: Any) -> Optional[Dict[str, Any] | list]:
-        if isinstance(payload, list):
-            responses = []
-            for item in payload:
-                response = self._handle_single(item)
-                if response is not None:
-                    responses.append(response)
-            return responses or None
-        return self._handle_single(payload)
-
-    def _handle_single(self, payload: Any) -> Optional[Dict[str, Any]]:
-        if not isinstance(payload, dict):
-            return self._error_response(None, -32600, "Invalid Request")
-
-        if payload.get("jsonrpc") != "2.0":
-            return self._error_response(payload.get("id"), -32600, "Invalid Request: jsonrpc must be '2.0'")
-
-        method = payload.get("method")
-        request_id = payload.get("id")
-        params = payload.get("params")
+        req_id = data.get("id")          # None is valid for notifications
+        params = data.get("params", {})
         if params is None:
             params = {}
-        if not isinstance(params, dict):
-            return self._error_response(request_id, -32602, "Invalid params: object expected")
-        if not isinstance(method, str) or not method:
-            return self._error_response(request_id, -32600, "Invalid Request: method is required")
 
-        if request_id is None and method.startswith("notifications/"):
-            return None
-
-        context = _MethodContext(request_id=request_id, params=params)
-        try:
-            if method == "initialize":
-                return self._success_response(request_id, self._initialize(context))
-            if method == "tools/list":
-                return self._success_response(request_id, {"tools": self.tools.list_tools()})
-            if method == "tools/call":
-                return self._success_response(request_id, self._tools_call(context))
-            if method == "resources/list":
-                return self._success_response(request_id, {"resources": self.resources.list_resources()})
-            if method == "resources/read":
-                return self._success_response(request_id, self._resources_read(context))
-            if method == "ping":
-                return self._success_response(request_id, {"ok": True})
-            if request_id is None:
-                return None
-            return self._error_response(request_id, -32601, f"Method not found: {method}")
-        except ValueError as exc:
-            return self._error_response(request_id, -32602, str(exc))
-        except KeyError as exc:
-            return self._error_response(request_id, -32602, str(exc))
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Unhandled error while processing %s", method)
-            return self._error_response(request_id, -32603, f"Internal error: {exc}")
-
-    # ------------------------------------------------------------------ #
-    # MCP method handlers
-    # ------------------------------------------------------------------ #
-
-    def _initialize(self, context: _MethodContext) -> Dict[str, Any]:
-        client_version = str(context.params.get("protocolVersion", "")).strip()
-        if client_version and client_version != PROTOCOL_VERSION:
-            logger.info("Client protocol %s requested; serving %s", client_version, PROTOCOL_VERSION)
-        return {
-            "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {
-                "tools": {"listChanged": False},
-                "resources": {"listChanged": False, "subscribe": False},
-            },
-            "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-            "instructions": (
-                "Use tools for actions (search/scrape/lookup), then read resource URIs via resources/read "
-                "for complete document or code content."
-            ),
-        }
-
-    def _tools_call(self, context: _MethodContext) -> Dict[str, Any]:
-        name = str(context.params.get("name", "")).strip()
-        if not name:
-            raise ValueError("tools/call requires 'name'.")
-        arguments = context.params.get("arguments", {})
-        if isinstance(arguments, str):
+        # Coerce string params safely (don't silently swallow errors)
+        if isinstance(params, str):
             try:
-                arguments = json.loads(arguments)
-            except json.JSONDecodeError as exc:
-                raise ValueError("tools/call arguments string must contain valid JSON") from exc
-        if not isinstance(arguments, dict):
-            raise ValueError("tools/call arguments must be an object.")
+                params = json.loads(params)
+            except json.JSONDecodeError:
+                return self._error(req_id, -32602, f"Invalid params: could not parse string as JSON")
+
+        handler = self._methods.get(method)
+        if not handler:
+            return self._error(req_id, -32601, f"Method not found: {method}")
+
         try:
-            result = self.tools.call(name, arguments)
-        except ValueError as exc:
-            return {
-                "content": [{"type": "text", "text": str(exc)}],
-                "isError": True,
-            }
-        summary = self._tool_summary(name, result)
+            result = handler(params)
+            # Notifications have no id and expect no response
+            if req_id is None and method not in ("initialize", "tools/list"):
+                return None
+            return {"jsonrpc": "2.0", "id": req_id, "result": result}
+
+        except MCPError as e:
+            logger.warning(f"MCP error in {method}: {e.message}")
+            return self._error(req_id, e.code, e.message)
+        except Exception as e:
+            logger.exception(f"Unhandled error in method {method}")
+            return self._error(req_id, -32603, f"Internal error: {e}")
+
+    # ─── Handlers ─────────────────────────────────────────────────────────────
+
+    def _handle_initialize(self, params: dict) -> dict:
         return {
-            "content": [{"type": "text", "text": summary}],
-            "structuredContent": result,
+            "protocolVersion": "2024-11-05",
+            "capabilities": {
+                "tools":     {"listChanged": False},
+                "resources": {"listChanged": False, "subscribe": False},
+                "prompts":   {"listChanged": False}
+            },
+            "serverInfo": {
+                "name":    "scrapee",
+                "version": "2.0.0"
+            },
+            # ✅ This is what makes the agent use tools without being asked
+            "instructions": (
+                "You have access to a live web scraping and documentation search server. "
+                "ALWAYS use 'search_docs' or 'scrape_url' before answering any question "
+                "about a library, API, framework, package, or when the user provides a URL. "
+                "NEVER answer documentation or technical questions from training memory — "
+                "always fetch live data first. "
+                "After calling search_docs, read the returned resource_uris using "
+                "resources/read to get the full document content before responding. "
+                "If search_docs returns no results, call scrape_url to ingest fresh content, "
+                "then search again."
+            )
         }
 
-    def _resources_read(self, context: _MethodContext) -> Dict[str, Any]:
-        uri = str(context.params.get("uri", "")).strip()
+    def _handle_tools_list(self, params: dict) -> dict:
+        return {"tools": self.tools.list_tools()}
+
+    def _handle_tools_call(self, params: dict) -> dict:
+        name = params.get("name")
+        if not name:
+            raise MCPError(-32602, "Invalid params: 'name' is required for tools/call")
+
+        args = params.get("arguments", {})
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                raise MCPError(-32602, f"Invalid params: 'arguments' could not be parsed as JSON")
+
+        return self.tools.call(name, args)
+
+    def _handle_resources_list(self, params: dict) -> dict:
+        return {"resources": self.resources.list_resources()}
+
+    def _handle_resources_read(self, params: dict) -> dict:
+        uri = params.get("uri")
         if not uri:
-            raise ValueError("resources/read requires 'uri'.")
+            raise MCPError(-32602, "Invalid params: 'uri' is required for resources/read")
         return self.resources.read_resource(uri)
 
-    def _tool_summary(self, name: str, result: Dict[str, Any]) -> str:
-        if name == "search_docs":
-            return f"Found {result.get('total', 0)} document matches."
-        if name == "search_code":
-            return f"Found {result.get('total', 0)} code matches."
-        if name == "scrape_url":
-            return f"Ingested {result.get('documents_ingested', 0)} documents."
-        if name == "get_document":
-            doc = result.get("document", {})
-            return f"Resolved document {doc.get('uri', '')}."
-        return "Tool executed."
+    def _handle_prompts_list(self, params: dict) -> dict:
+        return {"prompts": []}
 
-    # ------------------------------------------------------------------ #
-    # JSON-RPC helpers
-    # ------------------------------------------------------------------ #
+    def _handle_prompts_get(self, params: dict) -> dict:
+        raise MCPError(-32601, "No prompts defined")
 
-    def _success_response(self, request_id: Any, result: Dict[str, Any]) -> Dict[str, Any]:
-        response: Dict[str, Any] = {"jsonrpc": "2.0", "result": result}
-        if request_id is not None:
-            response["id"] = request_id
-        return response
+    def _handle_ping(self, params: dict) -> dict:
+        return {}
 
-    def _error_response(self, request_id: Any, code: int, message: str, data: Dict[str, Any] | None = None) -> Dict[str, Any]:
-        response: Dict[str, Any] = {
+    # ─── Helpers ──────────────────────────────────────────────────────────────
+
+    def _error(self, req_id, code: int, message: str) -> dict:
+        return {
             "jsonrpc": "2.0",
-            "error": {"code": code, "message": message},
+            "id": req_id,
+            "error": {"code": code, "message": message}
         }
-        if data is not None:
-            response["error"]["data"] = data
-        if request_id is not None:
-            response["id"] = request_id
-        return response
+
+
+class MCPError(Exception):
+    def __init__(self, code: int, message: str):
+        self.code = code
+        self.message = message
+        super().__init__(message)

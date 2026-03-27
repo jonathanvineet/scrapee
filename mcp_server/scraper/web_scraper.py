@@ -23,11 +23,27 @@ logger = get_logger(__name__)
 
 class WebScraper:
     """Crawls public documentation pages and extracts structured content."""
+    def __init__(self, config=None, *, allowed_domains: Sequence[str] | None = None, timeout_seconds: int = SCRAPE_REQUEST_TIMEOUT_SECONDS):
+        configured_domains = allowed_domains
+        if config is not None and configured_domains is None:
+            configured_domains = getattr(config, "allowed_domains", None)
+        configured_timeout = timeout_seconds
+        if config is not None:
+            configured_timeout = int(getattr(config, "scrape_timeout_seconds", configured_timeout))
 
-    def __init__(self, *, allowed_domains: Sequence[str] | None = None, timeout_seconds: int = SCRAPE_REQUEST_TIMEOUT_SECONDS):
-        self.allowed_domains = tuple(allowed_domains or ())
+        self.allowed_domains = tuple(configured_domains or ())
+        self.timeout_seconds = configured_timeout
+        self.smart_available = True
+        self.selenium_available = False
+        self.ultrafast_available = False
         self.timeout_seconds = timeout_seconds
         self._session = self._build_session()
+
+    def validate_url(self, url: str) -> tuple[bool, str]:
+        normalized = normalize_source_url(url)
+        if not normalized:
+            return False, "Invalid URL format"
+        return validate_public_url(normalized, self.allowed_domains)
 
     def _build_session(self) -> requests.Session:
         retry = Retry(

@@ -39,3 +39,9 @@ AUTO_INGEST_HINTS = {
     "typescript": "https://www.typescriptlang.org/docs/",
     "javascript": "https://developer.mozilla.org/en-US/docs/Web/JavaScript",
 }
+
+
+class Config:
+    def __init__(self):
+        self.sqlite_path = os.getenv("SQLITE_DB_PATH", DB_PATH)
+        self.allowed_domains = ALLOWED_DOMAINS

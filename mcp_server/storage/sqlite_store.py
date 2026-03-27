@@ -1,344 +1,244 @@
-"""SQLite persistence and search index for docs and code resources."""
+"""
+SQLite storage with FTS5 search, snippet highlighting, and in-process LRU cache.
+"""
 
-from __future__ import annotations
-
-import json
 import sqlite3
-import threading
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Dict, List, Optional
+import json
+import time
+import hashlib
+import logging
+import os
+from typing import Optional
+from mcp_server.logging_utils import setup_logging
 
-from mcp_server.logging_utils import get_logger
-from mcp_server.utils import code_uri_for_snippet, fts_query_from_text
+logger = setup_logging(__name__)
 
-
-logger = get_logger(__name__)
+CACHE_TTL = 300  # seconds — 5 minutes
 
 
 class SQLiteStore:
-    """Persistent store with FTS indexes for documents and snippets."""
 
-    def __init__(self, db_path: str):
-        self.db_path = db_path
-        self._ensure_parent_dir(db_path)
-        self._lock = threading.RLock()
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA foreign_keys = ON")
-        self.conn.execute("PRAGMA journal_mode = WAL")
-        self.conn.execute("PRAGMA synchronous = NORMAL")
+    def __init__(self, db_path: str = None):
+        self.db_path = db_path or os.getenv("SQLITE_DB_PATH", "/tmp/scrapee.db")
+        self._cache: dict = {}
+        self._cache_ts: dict = {}
+        self.conn = self._connect()
         self._init_schema()
-        logger.info("SQLite store initialized at %s", db_path)
 
-    def _ensure_parent_dir(self, db_path: str) -> None:
-        path = Path(db_path)
-        if not path.parent.exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
+    # ─── Connection ───────────────────────────────────────────────────────────
 
-    def _init_schema(self) -> None:
-        with self._lock:
-            cursor = self.conn.cursor()
-            cursor.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS documents (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    uri TEXT NOT NULL UNIQUE,
-                    source_url TEXT NOT NULL UNIQUE,
-                    title TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    metadata_json TEXT NOT NULL,
-                    scraped_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
 
-                CREATE TABLE IF NOT EXISTS document_chunks (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    document_id INTEGER NOT NULL,
-                    chunk_index INTEGER NOT NULL,
-                    chunk_text TEXT NOT NULL,
-                    FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
-                );
+    def _init_schema(self):
+        self.conn.executescript("""
+            CREATE TABLE IF NOT EXISTS docs (
+                id       TEXT PRIMARY KEY,
+                url      TEXT UNIQUE NOT NULL,
+                title    TEXT,
+                content  TEXT,
+                metadata TEXT,
+                created_at INTEGER DEFAULT (strftime('%s','now'))
+            );
 
-                CREATE TABLE IF NOT EXISTS code_snippets (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    document_id INTEGER NOT NULL,
-                    uri TEXT NOT NULL UNIQUE,
-                    language TEXT NOT NULL,
-                    snippet TEXT NOT NULL,
-                    context TEXT NOT NULL,
-                    line_start INTEGER NOT NULL DEFAULT 0,
-                    FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
-                );
+            CREATE TABLE IF NOT EXISTS code_blocks (
+                id       TEXT PRIMARY KEY,
+                doc_id   TEXT REFERENCES docs(id),
+                language TEXT,
+                code     TEXT,
+                context  TEXT,
+                line_no  INTEGER
+            );
 
-                CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts
-                USING fts5(uri, title, content, source_url, tokenize='porter unicode61');
+            CREATE TABLE IF NOT EXISTS doc_topics (
+                doc_id TEXT REFERENCES docs(id),
+                topic  TEXT
+            );
 
-                CREATE VIRTUAL TABLE IF NOT EXISTS code_fts
-                USING fts5(uri, language, snippet, context, tokenize='porter unicode61');
+            CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts
+                USING fts5(title, content, content=docs, content_rowid=rowid);
 
-                CREATE INDEX IF NOT EXISTS idx_documents_scraped_at ON documents(scraped_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_chunks_document_id ON document_chunks(document_id);
-                CREATE INDEX IF NOT EXISTS idx_code_document_id ON code_snippets(document_id);
-                CREATE INDEX IF NOT EXISTS idx_code_language ON code_snippets(language);
-                """
-            )
-            self.conn.commit()
+            CREATE VIRTUAL TABLE IF NOT EXISTS code_fts
+                USING fts5(code, context, content=code_blocks, content_rowid=rowid);
 
-    def close(self) -> None:
-        with self._lock:
-            self.conn.close()
+            CREATE TRIGGER IF NOT EXISTS docs_ai AFTER INSERT ON docs BEGIN
+                INSERT INTO docs_fts(rowid, title, content)
+                VALUES (new.rowid, new.title, new.content);
+            END;
 
-    def upsert_document(
-        self,
-        *,
-        uri: str,
-        source_url: str,
-        title: str,
-        content: str,
-        metadata: Dict[str, object],
-        chunks: List[str],
-        code_blocks: List[Dict[str, object]],
-    ) -> Dict[str, object]:
-        now = datetime.now(timezone.utc).isoformat()
+            CREATE TRIGGER IF NOT EXISTS code_ai AFTER INSERT ON code_blocks BEGIN
+                INSERT INTO code_fts(rowid, code, context)
+                VALUES (new.rowid, new.code, new.context);
+            END;
+        """)
+        self.conn.commit()
 
-        with self._lock:
-            cursor = self.conn.cursor()
-            cursor.execute("SELECT id, scraped_at FROM documents WHERE uri = ? OR source_url = ?", (uri, source_url))
-            existing = cursor.fetchone()
-            if existing:
-                doc_id = int(existing["id"])
-                scraped_at = str(existing["scraped_at"])
-                cursor.execute(
-                    """
-                    UPDATE documents
-                    SET source_url = ?, title = ?, content = ?, metadata_json = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (source_url, title, content, json.dumps(metadata, ensure_ascii=False), now, doc_id),
-                )
-            else:
-                cursor.execute(
-                    """
-                    INSERT INTO documents(uri, source_url, title, content, metadata_json, scraped_at, updated_at)
-                    VALUES(?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (uri, source_url, title, content, json.dumps(metadata, ensure_ascii=False), now, now),
-                )
-                doc_id = int(cursor.lastrowid)
-                scraped_at = now
+    # ─── Cache helpers ────────────────────────────────────────────────────────
 
-            cursor.execute("DELETE FROM docs_fts WHERE rowid = ?", (doc_id,))
-            cursor.execute(
-                "INSERT INTO docs_fts(rowid, uri, title, content, source_url) VALUES (?, ?, ?, ?, ?)",
-                (doc_id, uri, title, content, source_url),
-            )
+    def _cache_key(self, *parts) -> str:
+        return hashlib.md5(":".join(str(p) for p in parts).encode()).hexdigest()
 
-            cursor.execute("DELETE FROM document_chunks WHERE document_id = ?", (doc_id,))
-            for index, chunk in enumerate(chunks):
-                cursor.execute(
-                    "INSERT INTO document_chunks(document_id, chunk_index, chunk_text) VALUES (?, ?, ?)",
-                    (doc_id, index, chunk),
-                )
-
-            old_code_ids = [
-                int(row["id"]) for row in cursor.execute("SELECT id FROM code_snippets WHERE document_id = ?", (doc_id,))
-            ]
-            if old_code_ids:
-                cursor.executemany("DELETE FROM code_fts WHERE rowid = ?", [(code_id,) for code_id in old_code_ids])
-            cursor.execute("DELETE FROM code_snippets WHERE document_id = ?", (doc_id,))
-
-            inserted_code_uris: List[str] = []
-            for position, block in enumerate(code_blocks):
-                snippet = str(block.get("snippet", "")).strip()
-                if not snippet:
-                    continue
-                language = str(block.get("language", "text") or "text").lower()
-                context = str(block.get("context", "") or "")
-                line_start = int(block.get("line_start", 0) or 0)
-                code_uri = code_uri_for_snippet(uri, position)
-                cursor.execute(
-                    """
-                    INSERT INTO code_snippets(document_id, uri, language, snippet, context, line_start)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (doc_id, code_uri, language, snippet, context, line_start),
-                )
-                code_id = int(cursor.lastrowid)
-                cursor.execute(
-                    "INSERT INTO code_fts(rowid, uri, language, snippet, context) VALUES (?, ?, ?, ?, ?)",
-                    (code_id, code_uri, language, snippet, context),
-                )
-                inserted_code_uris.append(code_uri)
-
-            self.conn.commit()
-
-        return {
-            "document_id": doc_id,
-            "uri": uri,
-            "source_url": source_url,
-            "title": title,
-            "scraped_at": scraped_at,
-            "updated_at": now,
-            "code_uris": inserted_code_uris,
-            "chunk_count": len(chunks),
-        }
-
-    def list_documents(self) -> List[Dict[str, object]]:
-        cursor = self.conn.cursor()
-        rows = cursor.execute(
-            """
-            SELECT uri, source_url, title, scraped_at, updated_at
-            FROM documents
-            ORDER BY scraped_at DESC
-            """
-        ).fetchall()
-        return [dict(row) for row in rows]
-
-    def list_code_resources(self) -> List[Dict[str, object]]:
-        cursor = self.conn.cursor()
-        rows = cursor.execute(
-            """
-            SELECT c.uri, c.language, d.uri AS document_uri, d.source_url
-            FROM code_snippets c
-            JOIN documents d ON d.id = c.document_id
-            ORDER BY d.scraped_at DESC, c.id ASC
-            """
-        ).fetchall()
-        return [dict(row) for row in rows]
-
-    def get_document_by_uri(self, uri: str) -> Optional[Dict[str, object]]:
-        cursor = self.conn.cursor()
-        row = cursor.execute(
-            """
-            SELECT id, uri, source_url, title, content, metadata_json, scraped_at, updated_at
-            FROM documents
-            WHERE uri = ?
-            """,
-            (uri,),
-        ).fetchone()
-        if not row:
+    def _cache_get(self, key: str):
+        if key not in self._cache:
             return None
-        document = dict(row)
-        document["metadata"] = json.loads(document.pop("metadata_json") or "{}")
-        document["code_snippets"] = self.get_code_by_document_uri(uri)
-        return document
-
-    def get_document_by_source_url(self, source_url: str) -> Optional[Dict[str, object]]:
-        cursor = self.conn.cursor()
-        row = cursor.execute("SELECT uri FROM documents WHERE source_url = ?", (source_url,)).fetchone()
-        if not row:
+        if time.time() - self._cache_ts.get(key, 0) > CACHE_TTL:
+            del self._cache[key]
+            del self._cache_ts[key]
             return None
-        return self.get_document_by_uri(str(row["uri"]))
+        return self._cache[key]
 
-    def get_code_by_uri(self, uri: str) -> Optional[Dict[str, object]]:
-        cursor = self.conn.cursor()
-        row = cursor.execute(
-            """
-            SELECT c.uri, c.language, c.snippet, c.context, c.line_start, d.uri AS document_uri, d.source_url, d.title
-            FROM code_snippets c
-            JOIN documents d ON d.id = c.document_id
-            WHERE c.uri = ?
-            """,
-            (uri,),
-        ).fetchone()
-        return dict(row) if row else None
+    def _cache_set(self, key: str, value):
+        self._cache[key] = value
+        self._cache_ts[key] = time.time()
 
-    def get_code_by_document_uri(self, document_uri: str) -> List[Dict[str, object]]:
-        cursor = self.conn.cursor()
-        rows = cursor.execute(
-            """
-            SELECT c.uri, c.language, c.snippet, c.context, c.line_start
-            FROM code_snippets c
-            JOIN documents d ON d.id = c.document_id
-            WHERE d.uri = ?
-            ORDER BY c.id ASC
-            """,
-            (document_uri,),
-        ).fetchall()
-        return [dict(row) for row in rows]
+    def _cache_invalidate(self):
+        """Call after writes to clear stale search results."""
+        self._cache.clear()
+        self._cache_ts.clear()
 
-    def search_documents(self, query: str, limit: int) -> List[Dict[str, object]]:
-        cursor = self.conn.cursor()
-        prepared = fts_query_from_text(query)
+    # ─── Write ────────────────────────────────────────────────────────────────
+
+    def save_doc(self, doc_id: str, url: str, title: str, content: str, metadata: dict = None) -> bool:
         try:
-            rows = cursor.execute(
-                """
-                SELECT d.uri, d.source_url, d.title,
-                       snippet(docs_fts, 2, '[', ']', '...', 24) AS snippet,
-                       bm25(docs_fts) AS score
-                FROM docs_fts
-                JOIN documents d ON d.id = docs_fts.rowid
+            self.conn.execute("""
+                INSERT INTO docs (id, url, title, content, metadata)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(url) DO UPDATE SET
+                    title    = excluded.title,
+                    content  = excluded.content,
+                    metadata = excluded.metadata
+            """, (doc_id, url, title, content, json.dumps(metadata or {})))
+            self.conn.commit()
+            self._cache_invalidate()
+            return True
+        except Exception as e:
+            logger.error(f"save_doc error: {e}")
+            return False
+
+    def save_code_block(self, block_id: str, doc_id: str, language: str,
+                        code: str, context: str = "", line_no: int = 0) -> bool:
+        try:
+            self.conn.execute("""
+                INSERT OR IGNORE INTO code_blocks (id, doc_id, language, code, context, line_no)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (block_id, doc_id, language, code, context, line_no))
+            self.conn.commit()
+            self._cache_invalidate()
+            return True
+        except Exception as e:
+            logger.error(f"save_code_block error: {e}")
+            return False
+
+    # ─── Search ───────────────────────────────────────────────────────────────
+
+    def search_with_snippets(self, query: str, limit: int = 5) -> list:
+        """FTS5 search with highlighted snippets. Cached."""
+        cache_key = self._cache_key("search", query, limit)
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
+
+        try:
+            rows = self.conn.execute("""
+                SELECT
+                    d.id,
+                    d.url,
+                    d.title,
+                    snippet(docs_fts, 1, '[', ']', '...', 30) AS snippet,
+                    rank
+                FROM docs d
+                JOIN docs_fts ON d.id = docs_fts.rowid
                 WHERE docs_fts MATCH ?
-                ORDER BY score
+                ORDER BY rank
                 LIMIT ?
-                """,
-                (prepared, limit),
-            ).fetchall()
-            results = [dict(row) for row in rows]
-        except sqlite3.OperationalError:
-            like = f"%{query}%"
-            rows = cursor.execute(
-                """
-                SELECT uri, source_url, title, substr(content, 1, 240) AS snippet, 0.0 AS score
-                FROM documents
-                WHERE title LIKE ? OR content LIKE ?
-                ORDER BY scraped_at DESC
-                LIMIT ?
-                """,
-                (like, like, limit),
-            ).fetchall()
-            results = [dict(row) for row in rows]
-        return results
+            """, (query, limit)).fetchall()
+            result = [dict(r) for r in rows]
+            self._cache_set(cache_key, result)
+            return result
+        except Exception as e:
+            logger.error(f"search_with_snippets error: {e}")
+            return []
 
-    def search_code(self, query: str, limit: int, language: str | None = None) -> List[Dict[str, object]]:
-        cursor = self.conn.cursor()
-        prepared = fts_query_from_text(query)
-        filters: List[object] = [prepared]
-        sql = """
-            SELECT c.uri, c.language, d.uri AS document_uri, d.source_url, d.title,
-                   snippet(code_fts, 2, '[', ']', '...', 20) AS snippet,
-                   c.context, bm25(code_fts) AS score
-            FROM code_fts
-            JOIN code_snippets c ON c.id = code_fts.rowid
-            JOIN documents d ON d.id = c.document_id
-            WHERE code_fts MATCH ?
-        """
-        if language:
-            sql += " AND c.language = ?"
-            filters.append(language.lower())
-        sql += " ORDER BY score LIMIT ?"
-        filters.append(limit)
+    def search_code_with_context(self, query: str, language: str = None, limit: int = 5) -> list:
+        """FTS5 code search with optional language filter. Cached."""
+        cache_key = self._cache_key("code", query, language, limit)
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached
+
         try:
-            rows = cursor.execute(sql, tuple(filters)).fetchall()
-            results = [dict(row) for row in rows]
-        except sqlite3.OperationalError:
-            like = f"%{query}%"
-            fallback_sql = """
-                SELECT c.uri, c.language, d.uri AS document_uri, d.source_url, d.title,
-                       substr(c.snippet, 1, 220) AS snippet, c.context, 0.0 AS score
-                FROM code_snippets c
-                JOIN documents d ON d.id = c.document_id
-                WHERE (c.snippet LIKE ? OR c.context LIKE ?)
-            """
-            fallback_filters: List[object] = [like, like]
             if language:
-                fallback_sql += " AND c.language = ?"
-                fallback_filters.append(language.lower())
-            fallback_sql += " ORDER BY c.id DESC LIMIT ?"
-            fallback_filters.append(limit)
-            rows = cursor.execute(fallback_sql, tuple(fallback_filters)).fetchall()
-            results = [dict(row) for row in rows]
-        return results
+                rows = self.conn.execute("""
+                    SELECT
+                        c.id, c.doc_id, c.language, c.code,
+                        snippet(code_fts, 0, '[', ']', '...', 20) AS snippet,
+                        d.url, d.title, rank
+                    FROM code_blocks c
+                    JOIN code_fts ON c.id = code_fts.rowid
+                    JOIN docs d ON c.doc_id = d.id
+                    WHERE code_fts MATCH ? AND c.language = ?
+                    ORDER BY rank LIMIT ?
+                """, (query, language, limit)).fetchall()
+            else:
+                rows = self.conn.execute("""
+                    SELECT
+                        c.id, c.doc_id, c.language, c.code,
+                        snippet(code_fts, 0, '[', ']', '...', 20) AS snippet,
+                        d.url, d.title, rank
+                    FROM code_blocks c
+                    JOIN code_fts ON c.id = code_fts.rowid
+                    JOIN docs d ON c.doc_id = d.id
+                    WHERE code_fts MATCH ?
+                    ORDER BY rank LIMIT ?
+                """, (query, limit)).fetchall()
 
-    def stats(self) -> Dict[str, object]:
-        cursor = self.conn.cursor()
-        total_docs = int(cursor.execute("SELECT COUNT(*) AS count FROM documents").fetchone()["count"])
-        total_code = int(cursor.execute("SELECT COUNT(*) AS count FROM code_snippets").fetchone()["count"])
-        total_chunks = int(cursor.execute("SELECT COUNT(*) AS count FROM document_chunks").fetchone()["count"])
-        return {
-            "total_documents": total_docs,
-            "total_code_snippets": total_code,
-            "total_chunks": total_chunks,
-            "database_path": self.db_path,
-        }
+            result = [dict(r) for r in rows]
+            self._cache_set(cache_key, result)
+            return result
+        except Exception as e:
+            logger.error(f"search_code_with_context error: {e}")
+            return []
+
+    # ─── Read ─────────────────────────────────────────────────────────────────
+
+    def get_doc_by_id(self, doc_id: str) -> Optional[dict]:
+        try:
+            row = self.conn.execute(
+                "SELECT * FROM docs WHERE id = ?", (doc_id,)
+            ).fetchone()
+            return dict(row) if row else None
+        except Exception:
+            return None
+
+    def get_doc_by_url(self, url: str) -> Optional[dict]:
+        try:
+            row = self.conn.execute(
+                "SELECT * FROM docs WHERE url = ?", (url,)
+            ).fetchone()
+            return dict(row) if row else None
+        except Exception:
+            return None
+
+    def list_docs(self, limit: int = 20) -> list:
+        try:
+            rows = self.conn.execute(
+                "SELECT id, url, title, created_at FROM docs ORDER BY created_at DESC LIMIT ?",
+                (limit,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception as e:
+            logger.error(f"list_docs error: {e}")
+            return []
+
+    def get_stats(self) -> dict:
+        try:
+            doc_count  = self.conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
+            code_count = self.conn.execute("SELECT COUNT(*) FROM code_blocks").fetchone()[0]
+            return {"total_docs": doc_count, "total_code_blocks": code_count}
+        except Exception as e:
+            return {"total_docs": 0, "total_code_blocks": 0, "error": str(e)}
