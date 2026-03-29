@@ -220,6 +220,10 @@ class ToolRegistry:
 
         try:
             result = self.ingestion.ingest_url(url, max_depth=max_depth, max_pages=max_pages)
+            documents_ingested = result.get("documents_ingested", 0)
+            doc_uris = result.get("document_resource_uris", [])
+            errors = result.get("errors", [])
+            
             return {
                 "content": [
                     {
@@ -227,12 +231,16 @@ class ToolRegistry:
                         "text": json.dumps({
                             "success": True,
                             "url": url,
-                            "pages_ingested": result.get("pages_ingested", 0),
-                            "doc_ids": result.get("doc_ids", []),
+                            "documents_ingested": documents_ingested,
+                            "document_uris": doc_uris,
+                            "errors": errors,
                             "_meta": {
+                                "total": documents_ingested,
                                 "hint": (
-                                    "Content has been indexed. "
+                                    f"Indexed {documents_ingested} page(s). "
                                     "Now call search_docs to find relevant information."
+                                ) if documents_ingested > 0 else (
+                                    "No pages were successfully scraped. Check the URL and try again."
                                 )
                             }
                         }, indent=2)
@@ -240,6 +248,7 @@ class ToolRegistry:
                 ]
             }
         except Exception as e:
+            logger.exception(f"Scrape failed for {url}")
             return self._error(f"Scrape failed: {e}")
 
     def _handle_search_code(self, args: dict) -> dict:
