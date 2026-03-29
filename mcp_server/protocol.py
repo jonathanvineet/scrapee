@@ -137,7 +137,11 @@ class MCPProtocol:
         uri = params.get("uri")
         if not uri:
             raise MCPError(-32602, "Invalid params: 'uri' is required for resources/read")
-        return self.resources.read_resource(uri)
+        try:
+            return self.resources.read_resource(uri)
+        except KeyError as e:
+            raise MCPError(-32602, f"Resource not found: {e}")
+
 
     def _handle_prompts_list(self, params: dict) -> dict:
         return {"prompts": []}
