@@ -293,12 +293,15 @@ class SQLiteStore:
             language = metadata.get("language", "")
             scraped_at = datetime.utcnow().isoformat()
             
+            print(f"[DEBUG] Saving doc: {url!r} with title: {title!r}, content length: {len(content)}")
+            
             cursor = self.conn.cursor()
             cursor.execute("SELECT id FROM docs WHERE url = ?", (url,))
             existing = cursor.fetchone()
 
             if existing:
                 doc_id = existing["id"]
+                print(f"[DEBUG] Updating existing doc id={doc_id}")
                 cursor.execute(
                     """
                     UPDATE docs
@@ -316,12 +319,14 @@ class SQLiteStore:
                     (url, title, content, domain, language, scraped_at, json.dumps(metadata)),
                 )
                 doc_id = cursor.lastrowid
+                print(f"[DEBUG] Created new doc id={doc_id}")
 
             cursor.execute("DELETE FROM docs_fts WHERE rowid = ?", (doc_id,))
             cursor.execute(
                 "INSERT INTO docs_fts(rowid, title, content, url) VALUES (?, ?, ?, ?)",
                 (doc_id, title, content, url),
             )
+            print(f"[DEBUG] Indexed in FTS5 with rowid={doc_id}")
 
             old_code_ids = [row["id"] for row in cursor.execute("SELECT id FROM code_blocks WHERE doc_id = ?", (doc_id,)).fetchall()]
             if old_code_ids:
@@ -455,25 +460,32 @@ class SQLiteStore:
         prepared_query = self._prepare_fts_query(query)
         like_query = f"%{query}%"
         
+        print(f"[DEBUG] Searching for: {query!r} → FTS: {prepared_query!r}")
+        
         # FTS5 MATCH cannot be combined with OR on external tables directly in SQLite.
         # We run the FTS query first.
-        cursor.execute(
-            """
-            SELECT
-                d.id,
-                d.url,
-                d.title,
-                snippet(docs_fts, 1, '[', ']', '...', 32) AS snippet,
-                bm25(docs_fts) AS score
-            FROM docs_fts
-            JOIN docs d ON docs_fts.rowid = d.id
-            WHERE docs_fts MATCH ?
-            ORDER BY score
-            LIMIT ?
-            """,
-            (prepared_query, limit),
-        )
-        results = [dict(row) for row in cursor.fetchall()]
+        try:
+            cursor.execute(
+                """
+                SELECT
+                    d.id,
+                    d.url,
+                    d.title,
+                    snippet(docs_fts, 1, '[', ']', '...', 32) AS snippet,
+                    bm25(docs_fts) AS score
+                FROM docs_fts
+                JOIN docs d ON docs_fts.rowid = d.id
+                WHERE docs_fts MATCH ?
+                ORDER BY score
+                LIMIT ?
+                """,
+                (prepared_query, limit),
+            )
+            results = [dict(row) for row in cursor.fetchall()]
+            print(f"[DEBUG] FTS found {len(results)} results")
+        except Exception as e:
+            print(f"[DEBUG] FTS search failed: {e}, falling back to LIKE")
+            results = []
         
         # Fallback to LIKE if FTS yields fewer results than limit
         if len(results) < limit:
@@ -499,8 +511,11 @@ class SQLiteStore:
                 """
                 cursor.execute(sql, (like_query, like_query, remaining))
                 
-            results.extend([dict(row) for row in cursor.fetchall()])
+            fallback_results = [dict(row) for row in cursor.fetchall()]
+            results.extend(fallback_results)
+            print(f"[DEBUG] LIKE fallback found {len(fallback_results)} additional results")
             
+        print(f"[DEBUG] Total results: {len(results)}")
         return results
 
     def search_and_get(self, query: str, limit: int = 5, snippet_length: int = 400) -> List[Dict]:
@@ -761,10 +776,14 @@ class SQLiteStore:
         }
 
     def _prepare_fts_query(self, query: str) -> str:
-        tokens = [token for token in re.findall(r"[A-Za-z0-9_./:-]+", query) if token]
+        """Prepare an FTS5 query with both AND and OR operators for better matching."""
+        # Extract alphanumeric tokens, preserving case sensitivity
+        tokens = [token for token in re.findall(r"[A-Za-z0-9_./:-]+", query) if len(token) > 0]
         if not tokens:
             return '""'
-        return " AND ".join(f'"{token}"*' for token in tokens)
+        # Use OR logic to cast a wider net in FTS5 searches
+        # This makes "scrapee" match documents containing "scrapee" in any indexed field
+        return " OR ".join(f'"{token}"*' for token in tokens)
 
     def _load_metadata(self, raw_metadata) -> Dict:
         if not raw_metadata:
