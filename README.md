@@ -725,103 +725,317 @@ All search and storage operations include comprehensive debug logs:
 
 The `utils/url_intelligence.py` module provides two core capabilities:
 
-#### 1. URL Blocking (HARD Filter)
+#### 1. URL Blocking (HARD Filter) — Universal, No Domain Hardcoding
 
-**Universal Blocklist** — Applied to every domain:
+The blocker uses purely structural signals that work on ANY website:
+
+**Universal Path Segments** (blocked on every site, no exceptions):
 ```
-/login, /logout, /signin, /signup, /register, /auth, /oauth
-/pricing, /plans, /billing, /subscribe, /enterprise, /careers
-/terms, /privacy, /cookie-policy, /legal
-/blog, /press, /events, /newsletter, /ebook, /download-pdf
-/feed, /rss, /sitemap, /robots.txt, /search, /explore, /trending
+Authentication: login, logout, signin, signup, register, auth, oauth, sso
+                reset-password, forgot-password, verify-email, 2fa, mfa
+
+Commercial:     pricing, plans, billing, checkout, subscribe, upgrade
+                sales, demo, careers, jobs, about, press, newsletter, events
+                podcast, shop, donate, contact
+
+Legal/Policy:   terms, privacy, cookie-policy, legal, security, dmca, gdpr
+                ccpa, copyright, licenses
+
+Navigation:     search, explore, trending, popular, sitemap, 404, 500
+
+CMS Infra:      wp-admin, wp-login, wp-json, admin, dashboard, backend
+                healthcheck, feed, rss, atom, robots.txt
+
+Social/Community: followers, following, likes, notifications, messages
+                  settings, profile, edit-profile
 ```
 
-**Domain-Specific Blocklists** — GitHub example:
+**Structural Pattern Blockers** (regex-based, apply to all sites):
 ```
-/stargazers, /watchers, /network, /forks, /followers
-/pulse, /graphs, /archive, /releases/download, /zipball, /tarball
-/compare, /actions, /projects, /packages, /security, /insights, /settings
-/deployments, /labels, /milestones, /sponsors, /marketplace
-```
-
-**File Extension Blocklist:**
-```
-.png, .jpg, .jpeg, .gif, .svg, .pdf, .zip, .tar, .gz
-.css (stylesheets, no content), .js/.ts (raw source, not prose)
-.map, .woff, .ttf, .mp4, .mp3, etc.
+Pagination:       ?page=N, /page/2, /p/3, /2/ (bare numbers)
+Versioned docs:   /v1.2.3/, /1.0/, /0.9.x/ (old docs archives)
+Downloads:        /download, /raw, /export, /print (binary endpoints)
+Date archives:    /2024/01/02/ (year/month blog navigation)
+User content:     /(author|user|profile)/username (user-gen spam)
+Tracking junk:    ?utm_*, ?ref=, ?source=, ?medium=, ?campaign=
 ```
 
-#### 2. URL Scoring (0–100)
+**File Extension Blocklist** (never fetch):
+```
+Images:    .png, .jpg, .jpeg, .gif, .svg, .ico, .webp, .avif, .bmp, .tiff
+Media:     .mp4, .mp3, .avi, .mov, .mkv, .webm, .wav, .ogg, .flac, .aac
+Archives:  .zip, .tar, .gz, .tgz, .bz2, .7z, .rar, .exe, .dmg, .pkg, .deb
+Fonts:     .woff, .woff2, .ttf, .eot, .otf
+Docs:      .pdf, .doc, .docx, .xls, .xlsx, .ppt, .pptx
+Code:      .css, .map, .min.js
+```
 
-Each allowed URL gets a score that influences crawl priority:
+**Why No Domain Lists?** These path segments and patterns are universal across every website — GitHub, AWS, Stripe, Notion, Reddit all have `/login`, `/pricing`, `/careers`. Using structural signals instead of hardcoded domain blocklists means the crawler works on millions of sites without maintenance.
+
+**Extend for Site-Specific Needs:**
+```python
+intel = URLIntelligence(
+    seed_url="https://example.com",
+    extra_blocklist=["custom-segment", "another-spam-path"]
+)
+```
+
+#### 2. URL Scoring (0–100) — Structural Signals Only
+
+Every allowed URL gets a composite score based on purely structural heuristics (no site knowledge):
 
 **Base Score:** 50
 
-**Modifiers:**
-```python
-# Same-domain: +20, Cross-domain: -30
-# Path quality (first match wins):
-#   /readme, /getting-started, /quickstart, /introduction  → +30
-#   /docs, /documentation, /guide, /manual, /reference, /api  → +25
-#   /wiki, /handbook, /playbook  → +22
-#   /example, /sample, /demo, /tutorial  → +15
-#   /changelog, /migration, /release-notes  → +10
-#   /installation, /setup, /configuration  → +10
-#   /concept, /architecture, /design  → +8
-#   /faq, /troubleshoot, /debug  → +5
+**Scoring Signals:**
+```
+Same-domain bonus:           +15  (URL's host matches seed URL's host)
+Cross-domain penalty:        -25  (deprioritise off-domain crawls)
+Sub-path bonus:              +10  (URL path starts with seed path)
 
-# Penalties:
-#   Paginated results (?page=N)  → -10
-#   Old version docs (/v1.0.0/)  → -5
-#   Test/spec files (/tests/, /specs/)  → -15
-#   Binary/media files  → -50
+High-value keywords (first match wins, apply only once):
+  /docs, /documentation, /manual, /handbook, /playbook  → +25
+  /api, /reference, /spec, /specification               → +22
+  /guide, /guides, /tutorial, /tutorials                → +20
+  /wiki, /knowledge-base, /kb                           → +20
+  /getting-started, /quickstart, /onboarding            → +18
+  /introduction, /intro, /overview, /concepts            → +15
+  /example, /examples, /sample, /demo, /cookbook        → +14
+  /howto, /faq, /troubleshoot, /debug                   → +12
+  /readme, /changelog, /migration, /release-notes       → +12
+  /install, /installation, /setup, /configuration       → +10
+  /blog, /article, /articles, /post, /posts, /learn     → +8
 
-# Depth penalty:
-#   Very deep paths (>6 segments)  → -5
-#   Shallow paths (≤2 segments)  → +5
+Low-value penalties:
+  /archive, /archives              → -8
+  /test, /tests, /spec, /specs, /fixture, /fixtures  → -10
+  File extension is image/media/font → -50
 
-Final = max(0, min(100, base + modifiers))
+Path depth heuristic:
+  Root (/)                         → +5
+  Shallow (1–2 segments: /docs, /docs/api)  → +8
+  Medium (3–4 segments)            → +3
+  Very deep (7+ segments)          → -8
+
+Query string penalty:
+  Any query parameters (?key=val)  → -5
+
+Final score = max(0, min(100, base + all_applicable_bonuses + penalties))
 ```
 
-**Usage:**
+**Examples:**
+| URL | Depth | Keywords | Domain | Query | Final |
+|-----|-------|----------|--------|-------|-------|
+| `https://docs.example.com/guides/installation` | +3 | +10 (install) | +15 | 0 | **78** |
+| `https://example.com/blob/main/tests/unit.py` | +3 | -10 (tests) | +15 | 0 | **48** |
+| `https://github.com/user/repo/wiki/FAQ` | +8 | +12 (faq) | +15 | 0 | **85** |
+| `https://example.com/products?page=2&sort=date` | +3 | 0 | +15 | -5 | **63** |
+
+**API Usage:**
 ```python
-from utils.url_intelligence import URLIntelligence
+from backend.url_intelligence import URLIntelligence
 
-intel = URLIntelligence(seed_url="https://github.com/user/repo")
+intel = URLIntelligence(seed_url="https://docs.example.com")
 
-# Check if URL should be crawled at all
-if intel.is_allowed("https://github.com/user/repo/blob/main/README.md"):
+# Fast allowlist check (0 = blocked/junk)
+if intel.is_allowed("https://docs.example.com/guides/intro.md"):
     print("✓ Allowed")
-else:
-    print("✗ Blocked (login page, etc.)")
 
-# Get priority score
-score = intel.score("https://github.com/user/repo/wiki/Home")
-print(f"Score: {score}/100")  # ~85
+# Score 0–100
+score = intel.score("https://docs.example.com/api/reference")
+print(f"Score: {score}")  # 85+
 
-# Filter and rank a list of URLs
+# Filter and rank URLs
 urls = [
-    "https://github.com/user/repo/docs/guide.md",
-    "https://github.com/user/repo/login",
-    "https://github.com/user/repo/blob/main/tests/test.py",
-    "https://github.com/user/repo/wiki/FAQ",
+    "https://docs.example.com/guides/intro",
+    "https://example.com/login",
+    "https://docs.example.com/pricing",
+    "https://docs.example.com/api/types",
 ]
 ranked = intel.filter_and_rank(urls)
-# Returns: [docs/guide.md, wiki/FAQ] in order (login and tests blocked)
+# Returns: [api/types, guides/intro] (login and pricing blocked)
 
-# Human-readable category
-category = intel.categorise("https://github.com/user/repo/docs/guide.md")
-print(category)  # "excellent" (score >= 80)
+# Debug breakdown
+breakdown = intel.explain("https://docs.example.com/guides/intro")
+print(breakdown)
+# {
+#   "url": "...",
+#   "allowed": True,
+#   "score": 75,
+#   "label": "good"
+# }
 ```
 
-**Categories:**
-| Category | Score Range | Crawl Priority |
-|----------|-------------|-----------------|
-| excellent | 80–100 | Highest (crawl first) |
-| good | 60–79 | High |
-| ok | 45–59 | Medium |
-| low | 20–44 | Low |
-| skip | 0–19 | Lowest (crawl last or not at all) |
+---
+
+## Content Filter — Universal Quality Gate
+
+### Why Filter Before Indexing?
+
+Raw crawler output includes junk: nav pages (135 links, 11 paragraphs), marketing landing pages (short CTAs), and low-quality spin content. Filtering BEFORE storing saves database space, improves search relevance, and prevents agent confusion.
+
+**What Gets Rejected:**
+
+| Type | Signal | Example |
+|------|--------|---------|
+| Navigation/Index | 8+ links per paragraph | Sitemap, category archive, tag page |
+| Marketing | 50%+ paragraphs are CTAs | "Get started", "Sign up free", "Join millions" |
+| Empty State | <5 paragraphs after cleaning | GitHub 404, empty search results |
+| Low-Text | <120 total characters | Mostly images/nav, no prose |
+
+### Scoring Algorithm (0–100)
+
+The filter scores pages using ONLY structural/statistical signals — no site knowledge required:
+
+#### Signal 1: Link-to-Paragraph Ratio
+```
+Ratio = links_count / paragraphs_count
+
+Ratio < 1.0  → +15 (very content-dense, like a long article)
+Ratio < 3.0  → +10 (normal article)
+Ratio < 6.0  → +4  (mixed content + nav)
+Ratio > 8.0  → HARD CAP at 20 (navigation page, reject)
+
+Example:
+  Page A: 135 links, 11 paragraphs = 12.3 ratio → REJECTED (nav page)
+  Page B: 8 links, 20 paragraphs = 0.4 ratio   → +15 bonus (article)
+```
+
+#### Signal 2: Paragraph Depth & Volume
+```
+If paragraphs >= 20      → +25 (long-form content)
+Else if >= 10            → +18
+Else if >= 5             → +10
+Else if >= 2             → +5
+
+Average paragraph word count:
+  >= 40 words  → +15 (real articles)
+  >= 20 words  → +8
+  < 12 words   → -10 (CTAs, bullets, marketing)
+
+Total prose (all paragraphs):
+  >= 3000 chars  → +15
+  >= 1000 chars  → +8
+  >= 300 chars   → +3
+```
+
+#### Signal 3: Boilerplate Detection & Cleaning
+```
+Heading boilerplate (ALWAYS stripped before scoring):
+  "Navigation Menu", "Skip to content", "Table of Contents",
+  "Related Articles", "Comments", "Footer", "Advertisement"
+
+Paragraph boilerplate (ALWAYS stripped):
+  "We use cookies", "© 2024", "Powered by", "Subscribe to newsletter"
+  "Join millions of", "Get started free", "No credit card required"
+```
+
+#### Signal 4: Marketing CTA Density
+```
+If 50%+ of paragraphs contain CTA phrases → -20 (landing page)
+If 25%+ contain CTAs → -8
+
+CTA phrases detected:
+  "Sign up", "Get started", "Request a demo", "Try for free",
+  "Contact sales", "Schedule a call", "Join now", "Book a demo"
+```
+
+#### Signal 5: Technical Content Signals
+```
+Code blocks present        → +6 per block (capped at +20)
+Code fences (```) found    → +8
+Technical keywords found   → +5 (function, class, async, import, etc.)
+```
+
+#### Signal 6: URL & Title Patterns
+```
+Documentation keywords in URL:
+  /docs, /api, /guide, /tutorial, /faq, /readme → +12
+
+Content keywords in title:
+  "Guide", "Tutorial", "How to", "API docs", "Reference" → +10
+
+Very short title (1–2 words)  → -5 (probably nav/landing)
+```
+
+#### Final Score
+```python
+score = max(0, min(100, base_50 + all_bonuses + all_penalties))
+```
+
+**Example Scoring:**
+
+| Page | Links | Paras | Avg Words | CTAs | Code | Score | Result |
+|------|-------|-------|-----------|------|------|-------|--------|
+| GitHub issue #1234 | 45 | 3 | 8 | 0 | 0 | 18 | ❌ Rejected |
+| Python docs page | 8 | 18 | 35 | 0 | 2 | 78 | ✅ Indexed |
+| SaaS landing page | 12 | 8 | 9 | 4 | 0 | 25 | ❌ Rejected |
+| Tutorial article | 5 | 24 | 42 | 0 | 3 | 88 | ✅ Indexed |
+
+### Storage & API Impact
+
+**What's NOT stored:**
+```python
+# These are DISCARDED before indexing:
+raw["links"]                    # Navigation infrastructure
+raw["images"]                   # Not searchable
+raw["links_count"]              # Used for scoring only, not stored
+```
+
+**What IS stored:**
+```python
+{
+    "url":           str,                    # Full URL
+    "title":         str,                    # Page title
+    "content":       str,                    # Prose + headings + code
+    "code_blocks":   [{"snippet", "lang"}],  # Extracted code
+    "quality_score": 0-100,                  # For debugging
+}
+```
+
+**API Response (Compact):**
+```json
+{
+    "title":  "Python asyncio Guide",
+    "url":    "https://docs.python.org/3/library/asyncio.html",
+    "snippet": "asyncio is a library to write concurrent code using the async/await syntax…",
+    "quality_score": 87
+}
+```
+
+### Integration with Crawlers
+
+When you call `scrape_url` or `crawl()`, the output is automatically filtered:
+
+```python
+from backend.content_filter import ContentFilter
+
+cf = ContentFilter()
+
+# Process raw crawl output
+clean_docs = cf.process_batch(raw_pages)
+# Returns only: {"url", "title", "content", "code_blocks", "quality_score"}
+
+# Store them
+for doc in clean_docs:
+    store.save_doc(
+        url=doc["url"],
+        title=doc["title"],
+        content=doc["content"],
+        code_blocks=doc.get("code_blocks", []),
+    )
+```
+
+### Tuning Thresholds
+
+Edit [backend/content_filter.py](backend/content_filter.py):
+
+```python
+MIN_QUALITY_SCORE = 30          # Reject pages scoring below this
+MIN_PROSE_CHARS = 120           # Reject pages with < 120 chars cleaned prose
+MAX_CONTENT_CHARS = 50_000      # Truncate pages longer than 50KB
+LINK_TO_PARA_RATIO_LIMIT = 8.0  # Hard cap at 8 links per paragraph
+MIN_AVG_PARA_WORDS = 12.0       # Penalise pages with <12 avg words/para
+```
 
 ---
 
