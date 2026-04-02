@@ -162,14 +162,14 @@ def scrape():
     POST /api/scrape
     {
         "urls": ["https://example.com"],
-        "mode": "fast" | "smart" | "pipeline",
+        "mode": "smart" | "pipeline" | "selenium",
         "max_depth": 1,
         "output_format": "json"
     }
     Modes:
-      fast     → SeleniumCrawler
-      smart    → SmartCrawler (requests first, Selenium fallback)
-      pipeline → UltraFastCrawler (threaded)
+      smart    → SmartCrawler (intelligent priority queue, early exit at 5 good docs, max 30 pages)
+      pipeline → UltraFastCrawler (threaded concurrent crawling, max 50 pages)
+      selenium → SeleniumCrawler (full JS rendering)
     """
     if request.method == "OPTIONS":
         return "", 204
@@ -182,7 +182,7 @@ def scrape():
             return jsonify({"error": "urls is required", "status": "failed"}), 400
 
         urls = data.get("urls", [])
-        mode = data.get("mode", "smart")
+        mode = (data.get("mode", "smart") or "smart").strip().lower()
         max_depth = int(data.get("max_depth", 1))
         output_format = data.get("output_format", "json")
 
@@ -202,20 +202,41 @@ def scrape():
                     })
                     continue
 
-                if mode == "fast":
+                # ========== CRAWL BASED ON MODE ==========
+                
+                if mode == "selenium":
+                    # Full JS rendering via Selenium
                     if SeleniumCrawler is None:
                         return jsonify({"error": "SeleniumCrawler not available", "status": "failed"}), 422
                     crawler = SeleniumCrawler(start_url=start_url, max_depth=max_depth)
+                    raw = crawler.crawl()
+                    
                 elif mode == "pipeline":
+                    # Multi-threaded concurrent crawling, bounded to 50 pages
                     if UltraFastCrawler is None:
                         return jsonify({"error": "UltraFastCrawler not available", "status": "failed"}), 422
                     crawler = UltraFastCrawler(start_url=start_url, max_depth=max_depth, max_workers=8)
+                    # Add max_pages limit to prevent unbounded crawling
+                    crawler.max_pages = 50
+                    raw = crawler.crawl()
+                    
                 else:
+                    # Default: Smart priority-queue crawling (SMART/GHOST_PROTOCOL)
                     if SmartCrawler is None:
                         return jsonify({"error": "SmartCrawler not available", "status": "failed"}), 422
-                    crawler = SmartCrawler(start_url=start_url, max_depth=max_depth)
-
-                raw = crawler.crawl()
+                    # SmartCrawler doesn't take start_url in __init__, only in crawl()
+                    crawler = SmartCrawler(
+                        timeout=15,
+                        delay_between_requests=0.3,
+                        min_good_docs=5,
+                        cross_domain_budget=3,
+                    )
+                    # Call crawl with seed_url and limits
+                    raw = crawler.crawl(seed_url=start_url, max_pages=30, max_depth=max_depth)
+                    # Convert list[ScrapedDocument] to dict format for compatibility
+                    if isinstance(raw, list):
+                        raw = {doc.url: f"<h1>{doc.title}</h1>\n{doc.content}" for doc in raw}
+                
                 if not raw:
                     all_results.append({"url": start_url, "error": "No content scraped", "status": "failed"})
                     continue
