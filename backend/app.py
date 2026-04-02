@@ -248,9 +248,7 @@ def scrape():
                         cross_domain_budget=3,
                     )
                     # SmartCrawler.crawl() returns list[ScrapedDocument] with ContentFilter fields
-                    print(f"[DEBUG] Starting SmartCrawler for {start_url}", flush=True)
                     raw = crawler.crawl(seed_url=start_url, max_pages=30, max_depth=max_depth)
-                    print(f"[DEBUG] SmartCrawler returned {len(raw) if isinstance(raw, list) else 'unknown'} documents", flush=True)
                     # Convert ScrapedDocument objects to dicts
                     if isinstance(raw, list):
                         raw_pages = [
@@ -268,7 +266,6 @@ def scrape():
                         ]
                 
                 total_pages_scraped += len(raw_pages)
-                print(f"[DEBUG] Got {len(raw_pages)} raw pages from crawler", flush=True)
                 
                 if not raw_pages:
                     all_results.append({
@@ -279,9 +276,7 @@ def scrape():
                     continue
 
                 # ========== FILTER PAGES THROUGH CONTENT FILTER ==========
-                print(f"[DEBUG] Filtering {len(raw_pages)} pages through ContentFilter", flush=True)
                 filtered_pages = content_filter.process_batch(raw_pages)
-                print(f"[DEBUG] ContentFilter passed {len(filtered_pages)} pages, rejected {len(raw_pages) - len(filtered_pages)}", flush=True)
                 total_pages_rejected += len(raw_pages) - len(filtered_pages)
 
                 # Store filtered pages only
