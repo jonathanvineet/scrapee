@@ -1,148 +1,336 @@
-import time
-import json
-import requests
-import urllib3
-from collections import deque
-from urllib.parse import urlparse, urljoin, urldefrag
-import signal
+"""
+smart_crawler.py
+----------------
+Intelligent documentation crawler with:
+  - Scored priority queue (best pages first, not BFS/DFS)
+  - URL intelligence filtering via URLIntelligence
+  - Early-exit when results are good enough
+  - Per-domain crawl budgets
+  - Deduplication on normalised URLs
+  - Lightweight HTML parsing with title + prose extraction
+"""
 
+from __future__ import annotations
+
+import heapq
+import logging
+import re
+import time
+from dataclasses import dataclass, field
+from typing import Generator, Optional
+from urllib.parse import urljoin, urlparse, urlunparse
+
+import requests
 from bs4 import BeautifulSoup
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
 try:
-    from selenium import webdriver
-    from selenium.webdriver.chrome.service import Service
-    from selenium.webdriver.chrome.options import Options
-    from webdriver_manager.chrome import ChromeDriverManager
-    SELENIUM_AVAILABLE = True
+    from utils.url_intelligence import URLIntelligence
 except ImportError:
-    SELENIUM_AVAILABLE = False
+    # Fallback if import fails
+    URLIntelligence = None
 
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Data containers
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ScrapedDocument:
+    url: str
+    title: str
+    content: str                    # cleaned prose
+    code_blocks: list[dict]         # [{"snippet": ..., "language": ...}]
+    domain: str = ""
+    depth: int = 0
+    score: int = 0                  # URL score at crawl time
+
+    def __bool__(self) -> bool:
+        return bool(self.content and len(self.content) > 50)
+
+
+@dataclass(order=True)
+class _QueueEntry:
+    """Min-heap entry — negated score so highest score pops first."""
+    priority: int           # -score (lower = higher priority)
+    depth: int
+    url: str = field(compare=False)
+
+# ---------------------------------------------------------------------------
+# HTML helpers
+# ---------------------------------------------------------------------------
+
+_NOISE_TAGS = {"script", "style", "nav", "footer", "header", "aside",
+               "form", "noscript", "iframe", "svg", "button", "input"}
+
+_PROSE_TAGS = {"p", "li", "td", "dd", "blockquote", "article",
+               "section", "main", "h1", "h2", "h3", "h4", "h5", "h6"}
+
+
+def _extract_title(soup: BeautifulSoup) -> str:
+    for selector in ["h1", "title", 'meta[property="og:title"]']:
+        tag = soup.find(selector)
+        if tag:
+            return (tag.get("content") or tag.get_text(strip=True))[:200]
+    return ""
+
+
+def _extract_prose(soup: BeautifulSoup) -> str:
+    """Extract human-readable text, stripping nav/footer noise."""
+    # Remove noise tags in-place
+    for tag in soup(list(_NOISE_TAGS)):
+        tag.decompose()
+
+    # Prefer main content container if present
+    main = (soup.find("main") or
+            soup.find("article") or
+            soup.find(id=re.compile(r"(content|main|docs?)", re.I)) or
+            soup.find(class_=re.compile(r"(content|main|docs?|markdown|prose)", re.I)) or
+            soup.body or
+            soup)
+
+    parts: list[str] = []
+    for tag in main.find_all(_PROSE_TAGS):
+        text = tag.get_text(separator=" ", strip=True)
+        if len(text) > 20:  # skip stubs
+            parts.append(text)
+
+    return "\n".join(parts)
+
+
+def _extract_code_blocks(soup: BeautifulSoup) -> list[dict]:
+    blocks = []
+    for pre in soup.find_all("pre"):
+        code = pre.find("code")
+        snippet = (code or pre).get_text(strip=True)
+        if len(snippet) < 10:
+            continue
+        # Detect language from class attribute: "language-python", "lang-js", etc.
+        lang = ""
+        if code and code.get("class"):
+            for cls in code["class"]:
+                m = re.match(r"(?:language|lang)-(\w+)", cls, re.I)
+                if m:
+                    lang = m.group(1).lower()
+                    break
+        blocks.append({"snippet": snippet[:3000], "language": lang})
+    return blocks
+
+
+def _normalise_url(url: str) -> str:
+    """Strip fragment and trailing slash for dedup purposes."""
+    p = urlparse(url)
+    return urlunparse((p.scheme, p.netloc, p.path.rstrip("/"), p.params, p.query, ""))
+
+
+def _extract_links(soup: BeautifulSoup, base_url: str) -> list[str]:
+    links = []
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        if not href or href.startswith(("javascript:", "mailto:", "tel:")):
+            continue
+        full = urljoin(base_url, href)
+        # Drop fragment
+        full = full.split("#")[0]
+        if full:
+            links.append(full)
+    return links
+
+# ---------------------------------------------------------------------------
+# Session factory
+# ---------------------------------------------------------------------------
+
+def _make_session(timeout: int = 15) -> requests.Session:
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (compatible; ScrapeeBot/2.0; "
+            "+https://github.com/scrapee) DocsIndexer"
+        ),
+        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    })
+    s.max_redirects = 5
+    return s
+
+# ---------------------------------------------------------------------------
+# Main crawler
+# ---------------------------------------------------------------------------
 
 class SmartCrawler:
     """
-    Smart crawler — tries requests first, falls back to Selenium for JS-heavy pages.
-    On Vercel (no Selenium), runs requests-only path.
-    Has built-in timeout protection for Vercel serverless limits.
+    Priority-queue crawler that fetches highest-scored URLs first.
+
+    Key improvements over the old BFS approach:
+    - URLIntelligence scores every discovered link before it enters the queue
+    - Blocked URLs (login, signup, etc.) never enter the queue
+    - Early exit: if we already have `min_good_docs` high-quality documents,
+      we stop crawling even if max_pages not reached
+    - Per-domain budget caps cross-domain sprawl
+    - Adaptive delay avoids hammering a single server
     """
-    def __init__(self, start_url, max_depth=2, timeout_limit=25):
-        self.start_url = start_url.rstrip("/")
-        self.max_depth = max_depth
-        self.timeout_limit = timeout_limit  # Vercel function timeout protection
-        self.start_time = time.time()
 
-        parsed = urlparse(self.start_url)
-        self.base_domain = parsed.netloc
-        self.allowed_prefix = parsed.path.rstrip("/")
+    def __init__(
+        self,
+        timeout: int = 15,
+        delay_between_requests: float = 0.3,
+        min_good_docs: int = 5,         # early-exit threshold
+        cross_domain_budget: int = 3,   # max pages from any single off-seed domain
+    ) -> None:
+        self.timeout = timeout
+        self.delay = delay_between_requests
+        self.min_good_docs = min_good_docs
+        self.cross_domain_budget = cross_domain_budget
+        self.session = _make_session(timeout)
 
-        self.visited = set()
-        self.data = {}
+    # ------------------------------------------------------------------
+    # Public
+    # ------------------------------------------------------------------
 
-        self.driver = None  # lazy load
+    def crawl(
+        self,
+        seed_url: str,
+        max_pages: int = 30,
+        max_depth: int = 3,
+    ) -> list[ScrapedDocument]:
+        """
+        Crawl starting from `seed_url`.
 
-    def clean_url(self, url):
-        url, _ = urldefrag(url)
-        return url.rstrip("/")
+        Returns a list of ScrapedDocument, sorted by URL score descending
+        (highest quality first).
+        """
+        intel = URLIntelligence(seed_url) if URLIntelligence else None
+        visited: set[str] = set()
+        domain_counts: dict[str, int] = {}
+        heap: list[_QueueEntry] = []
+        results: list[ScrapedDocument] = []
+        good_doc_count = 0
 
-    def is_valid_url(self, url):
-        parsed = urlparse(url)
-        if parsed.scheme not in ["http", "https"]:
-            return False
-        if parsed.netloc != self.base_domain:
-            return False
-        
-        # Avoid auth/utility pages
-        path = parsed.path.lower()
-        junk_paths = ['login', 'signin', 'signup', 'register', 'logout', 'password-reset', 'cart', 'checkout', 'telemetry', 'track']
-        if any(jp in path for jp in junk_paths):
-            return False
+        # Seed
+        seed_score = 80 if not intel else intel.score(seed_url)
+        heapq.heappush(heap, _QueueEntry(-seed_score, 0, seed_url))
 
-        if self.allowed_prefix:
-            if not parsed.path.startswith(self.allowed_prefix):
-                return False
-        return True
+        logger.info("SmartCrawler starting: seed=%s max_pages=%d max_depth=%d",
+                    seed_url, max_pages, max_depth)
 
-    def fetch_with_requests(self, url):
+        while heap and len(results) < max_pages:
+            entry = heapq.heappop(heap)
+            url = entry.url
+            depth = entry.depth
+            score = -entry.priority
+
+            norm = _normalise_url(url)
+            if norm in visited:
+                continue
+            visited.add(norm)
+
+            # Cross-domain budget
+            host = urlparse(url).netloc
+            seed_host = urlparse(seed_url).netloc
+            if host != seed_host:
+                domain_counts[host] = domain_counts.get(host, 0) + 1
+                if domain_counts[host] > self.cross_domain_budget:
+                    logger.debug("Cross-domain budget exhausted for %s, skipping %s", host, url)
+                    continue
+
+            # Fetch
+            result = self._fetch_with_links(url, depth, score)
+            if result is None:
+                time.sleep(self.delay)
+                continue
+
+            doc, child_links = result
+            if doc:
+                results.append(doc)
+                if score >= 60:
+                    good_doc_count += 1
+                    if good_doc_count >= self.min_good_docs and depth > 1:
+                        logger.info(
+                            "Early exit: %d high-quality docs found at depth %d",
+                            good_doc_count, depth,
+                        )
+                        # Don't hard-stop — keep draining same depth level
+                        max_pages = len(results) + max(5, max_pages // 4)
+
+                # Discover and enqueue child links
+                if depth < max_depth and intel:
+                    ranked = intel.filter_and_rank(child_links)
+                    for child_url in ranked:
+                        child_norm = _normalise_url(child_url)
+                        if child_norm not in visited:
+                            child_score = intel.score(child_url)
+                            if child_score >= 30:   # skip very low-value links
+                                heapq.heappush(
+                                    heap,
+                                    _QueueEntry(-child_score, depth + 1, child_url),
+                                )
+                elif depth < max_depth:
+                    # Fallback: no URL intelligence, use basic heuristics
+                    for child_url in child_links:
+                        child_norm = _normalise_url(child_url)
+                        if child_norm not in visited and "/docs/" in child_url or "/wiki/" in child_url:
+                            heapq.heappush(
+                                heap,
+                                _QueueEntry(-75, depth + 1, child_url),
+                            )
+
+            time.sleep(self.delay)
+
+        # Sort final results: highest-score docs first
+        results.sort(key=lambda d: d.score, reverse=True)
+        logger.info(
+            "Crawl complete: %d pages fetched, %d good docs",
+            len(results), good_doc_count,
+        )
+        return results
+
+    # ------------------------------------------------------------------
+    # Private
+    # ------------------------------------------------------------------
+
+    def _fetch_with_links(
+        self, url: str, depth: int, score: int
+    ) -> Optional[tuple[Optional[ScrapedDocument], list[str]]]:
+        """Fetch a page and return (document, child_links) together."""
         try:
-            r = requests.get(url, timeout=8, verify=False, headers={
-                "User-Agent": "Mozilla/5.0 (compatible; Scrapee/1.0)"
-            })
-            if r.status_code == 200:
-                return r.text
-        except Exception:
+            resp = self.session.get(url, timeout=self.timeout, allow_redirects=True)
+            if resp.status_code != 200:
+                logger.debug("HTTP %d for %s", resp.status_code, url)
+                return None
+            if "text/html" not in resp.headers.get("content-type", ""):
+                logger.debug("Non-HTML for %s", url)
+                return None
+        except requests.RequestException as exc:
+            logger.warning("Fetch failed %s: %s", url, exc)
             return None
-        return None
 
-    def needs_selenium(self, html):
-        if not html:
-            return True
-        if len(html) < 2000:
-            return True
-        if '<div id="root"></div>' in html:
-            return True
-        if html.count("<script") > 20 and html.count("<p") < 5:
-            return True
-        return False
-
-    def fetch_with_selenium(self, url):
-        if not SELENIUM_AVAILABLE:
+        try:
+            soup = BeautifulSoup(resp.text, "html.parser")
+            title = _extract_title(soup)
+            links = _extract_links(soup, url)
+            prose = _extract_prose(soup)
+            code_blocks = _extract_code_blocks(soup)
+        except Exception as exc:
+            logger.warning("Parse failed %s: %s", url, exc)
             return None
-        if self.driver is None:
-            options = Options()
-            options.add_argument("--headless=new")
-            options.add_argument("--no-sandbox")
-            options.add_argument("--disable-dev-shm-usage")
-            options.add_argument("--disable-gpu")
-            options.add_argument("--blink-settings=imagesEnabled=false")
-            service = Service(ChromeDriverManager().install())
-            self.driver = webdriver.Chrome(service=service, options=options)
-        self.driver.get(url)
-        time.sleep(1)
-        return self.driver.page_source
 
-    def crawl(self):
-        queue = deque()
-        queue.append((self.start_url, 0))
+        if not prose or len(prose) < 50:
+            # Still return links so we don't lose crawl paths
+            logger.debug("Thin content (%d chars) at %s, but returning links", len(prose), url)
+            return None, links
 
-        while queue:
-            # Check timeout
-            elapsed = time.time() - self.start_time
-            if elapsed > self.timeout_limit:
-                raise TimeoutError(f'Crawl exceeded timeout limit of {self.timeout_limit}s')
-
-            current_url, depth = queue.popleft()
-            current_url = self.clean_url(current_url)
-
-            if current_url in self.visited:
-                continue
-            if depth > self.max_depth:
-                continue
-
-            self.visited.add(current_url)
-
-            html = self.fetch_with_requests(current_url)
-
-            # Only upgrade to Selenium if it's available AND the page looks JS-rendered
-            if SELENIUM_AVAILABLE and self.needs_selenium(html):
-                selenium_html = self.fetch_with_selenium(current_url)
-                if selenium_html:  # only use if Selenium actually returned something
-                    html = selenium_html
-
-            if not html:
-                continue
-
-            self.data[current_url] = html
-
-            soup = BeautifulSoup(html, "html.parser")
-            for tag in soup.find_all("a", href=True):
-                href = tag["href"]
-                full_url = urljoin(current_url, href)
-                full_url = self.clean_url(full_url)
-                if self.is_valid_url(full_url):
-                    queue.append((full_url, depth + 1))
-
-        if self.driver:
-            self.driver.quit()
-
-        return self.data
+        domain = urlparse(url).netloc
+        doc = ScrapedDocument(
+            url=url,
+            title=title or url,
+            content=prose,
+            code_blocks=code_blocks,
+            domain=domain,
+            depth=depth,
+            score=score,
+        )
+        logger.info(
+            "[score=%d depth=%d] %s — %d chars, %d codes",
+            score, depth, url, len(prose), len(code_blocks),
+        )
+        return doc, links
