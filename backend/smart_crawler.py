@@ -119,43 +119,23 @@ def _extract_paragraphs(soup: BeautifulSoup) -> list[str]:
 
 
 def _extract_prose(soup: BeautifulSoup) -> str:
-    """Extract human-readable text, stripping nav/footer noise."""
-    # Remove noise tags
-    soup_copy = BeautifulSoup(str(soup), "html.parser")
-    for tag in soup_copy.find_all(list(_NOISE_TAGS)):
-        tag.decompose()
-
-    # Prefer main content container if present
-    # Try to find actual main content, but fallback to body
-    main = soup_copy.body or soup_copy
+    """Extract human-readable text from page body, removing noise."""
+    # Use body as base, or entire document if no body
+    body = soup.body or soup
     
-    # Try to find more specific containers within body
-    for container in soup_copy.find_all(["main", "article"]):
-        main = container
-        break
+    # Clone and remove noise tags
+    soup_clean = BeautifulSoup(str(body), "html.parser")
+    for noise_tag in soup_clean.find_all(list(_NOISE_TAGS)):
+        noise_tag.decompose()
     
-    if not main or main.name == "body":
-        # If still in body, try to find content divs
-        for container in soup_copy.find_all(True):  # All tags
-            if container.name in ["main", "article"]:
-                main = container
-                break
-            elif container.get("id") and re.search(r"(content|main|docs?|article)", container.get("id"), re.I):
-                main = container
-                break
-            elif container.get("class"):
-                classes = " ".join(container.get("class", []))
-                if re.search(r"(content|main|docs?|markdown|prose|article)", classes, re.I):
-                    main = container
-                    break
-
+    # Extract all prose-like content
     parts: list[str] = []
-    if main:
-        for tag in main.find_all(_PROSE_TAGS):
-            text = tag.get_text(separator=" ", strip=True)
-            if len(text) > 20:  # skip stubs
-                parts.append(text)
-
+    for tag in soup_clean.find_all(_PROSE_TAGS):
+        text = tag.get_text(separator=" ", strip=True)
+        # Keep reasonable length content, skip very short fragments
+        if len(text) > 20:
+            parts.append(text)
+    
     return "\n".join(parts)
 
 
@@ -380,12 +360,9 @@ class SmartCrawler:
             return None
 
         if not prose or len(prose) < 50:
-            # Fallback: use paragraphs if prose extraction fails
-            prose = "\n".join(paragraphs) if paragraphs else ""
-            if not prose or len(prose) < 50:
-                # Still return links so we don't lose crawl paths
-                logger.debug("Thin content (%d chars) at %s, but returning links", len(prose), url)
-                return None, links
+            # Still return links so we don't lose crawl paths
+            logger.debug("Thin content (%d chars) at %s, but returning links", len(prose), url)
+            return None, links
 
         domain = urlparse(url).netloc
         doc = ScrapedDocument(
