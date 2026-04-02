@@ -50,16 +50,19 @@ scrapee/
 │   ├── mcp.py                       # MCPServer class with tool handlers
 │   ├── api.py                       # Legacy API endpoints (reference)
 │   ├── smart_scraper.py             # HTML parsing utilities
-│   ├── smart_crawler.py             # Intelligent crawling strategy
+│   ├── smart_crawler.py             # ⭐ Intelligent crawling with scored priority queue
 │   ├── selenium_crawler.py          # JavaScript-enabled crawler
 │   ├── pipeline_crawler.py          # Multi-stage pipeline crawler
 │   ├── storage/
-│   │   ├── sqlite_store.py          # ⭐ Core database/search engine
+│   │   ├── sqlite_store.py          # ⭐ Database/search with BM25 ranking & auto-sync
 │   │   └── redis_store.py           # (Optional) Redis persistence for Vercel
 │   ├── index/
 │   │   └── vector_search.py         # Semantic search support
 │   └── utils/
 │       └── normalize.py             # URL normalization
+│
+├── utils/
+│   └── url_intelligence.py          # ⭐ URL scoring & domain-aware blocking
 │
 ├── frontend/                         # Next.js React UI
 │   ├── app/
@@ -92,6 +95,11 @@ scrapee/
 ├── vercel.json                      # Vercel deployment config
 └── README.md                        # This file
 ```
+
+**⭐ Recently Improved:**
+- `utils/url_intelligence.py` — Domain-aware URL filtering & scoring (prevents GitHub junk crawling)
+- `backend/smart_crawler.py` — Scored priority queue replaces breadth-first (fetches docs first)
+- `backend/storage/sqlite_store.py` — BM25 ranking, auto-sync via triggers, smart single-pass search
 
 ### System Data Flow
 
@@ -359,24 +367,63 @@ CREATE TABLE docs (
   content TEXT NOT NULL,
   domain TEXT,
   status TEXT DEFAULT 'active',
+  content_hash TEXT,              -- Fingerprint for near-duplicate detection
   scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 ```
 
-#### **docs_fts Table** (FTS5 Virtual Index)
+**Near-Duplicate Detection:** When saving a document, its content is hashed and compared to existing docs on the same domain. If an identical hash is found, the save is skipped (idempotent). Prevents re-indexing the same page under slightly different URLs.
+
+#### **docs_fts Table** (FTS5 Virtual Index with Column Weights)
 ```sql
 CREATE VIRTUAL TABLE docs_fts USING fts5(
   title,
   content,
   url UNINDEXED,
-  tokenize='porter unicode61'
+  domain UNINDEXED,
+  tokenize='porter unicode61',
+  content='docs',                  -- linked to docs table
+  content_rowid='id'
 );
 ```
 
-- **tokenize='porter unicode61'**: 
-  - `porter`: Stemming algorithm (reduces words to roots)
-  - `unicode61`: Full Unicode support with special character handling
+**Column Weighting (via BM25):**
+- `title`: **5× weight** — matches in titles rank much higher
+- `content`: **1× weight** — matches in body text rank lower
+- `url`, `domain`: **UNINDEXED** — not searchable, stored for convenience
+
+This means:
+- "python" in a page title → strong match
+- "python" mentioned once in 5000-char content → weak match
+
+**Tokenizer:** `porter unicode61`
+- `porter`: Stemming (reduces words to roots: "running" → "run")
+- `unicode61`: Full Unicode support with special character handling
+
+#### **Automatic Index Sync (Triggers)**
+```sql
+CREATE TRIGGER docs_fts_insert
+  AFTER INSERT ON docs
+  BEGIN
+    INSERT INTO docs_fts(...) VALUES (new.id, new.title, new.content, ...);
+  END;
+
+CREATE TRIGGER docs_fts_update
+  AFTER UPDATE ON docs
+  BEGIN
+    DELETE from docs_fts WHERE rowid = old.id;
+    INSERT INTO docs_fts(...) VALUES (new.id, new.title, new.content, ...);
+  END;
+
+CREATE TRIGGER docs_fts_delete
+  AFTER DELETE ON docs
+  BEGIN
+    DELETE from docs_fts WHERE rowid = old.id;
+  END;
+```
+
+The index is **always in sync** — no manual `INSERT INTO docs_fts` calls needed.
 
 #### **code_blocks Table**
 ```sql
@@ -404,78 +451,188 @@ CREATE VIRTUAL TABLE code_fts USING fts5(
 
 ### Search Query Processing
 
-#### Query Tokenization
-Input: `"python async await"`
+#### Query Tokenization & FTS Query Builder
+Input: `"async await python"`
 
-**Tokens Extracted:**
+**Step 1: Tokenize**
 ```python
-tokens = ["python", "async", "await"]
+tokens = ["async", "await", "python"]
 ```
 
-#### FTS Query Construction (OR Logic)
-**From:** Single AND-based query (too restrictive)
-**To:** OR-based query (current - more forgiving)
-
+**Step 2: Build FTS Query**
 ```python
-# Current implementation (OR logic)
-prepared = '"python"* OR "async"* OR "await"*'
+# Current implementation (OR logic — more forgiving)
+fts_query = '"async"* OR "await"* OR "python"*'
 ```
 
 **Why OR instead of AND?**
-- AND requires ALL tokens in same document → Often returns 0 results
-- OR requires ANY token in document → Returns relevant documents
-- User experience: More results, not fewer
+- **AND logic** (old): Requires **all** tokens in document → Often 0 results
+  - Example: Search "python async" only matches pages mentioning BOTH words
+- **OR logic** (current): Requires **any** token in document → More results
+  - Example: Search "python async" matches pages mentioning either word
+- **User experience**: More results (relevance-ranked) > fewer results
 
-#### Search Execution
+#### Three-Layer Search Pipeline
 
 ```
-┌──────────────────────────┐
-│   Input Query            │
-│   "python decorators"    │
-└──────────────────────────┘
-           ↓
-┌──────────────────────────┐
-│   Tokenize & Prepare     │
-│   '"python"* OR "deco*"'│
-└──────────────────────────┘
-           ↓
-┌──────────────────────────┐
-│   FTS5 MATCH Search      │
-│   (Fast, indexed)        │
-└──────────────────────────┘
-           ↓
-      ┌─ Found Results?
-      │  ├─ Yes → Return them (maybe add LIKE results)
-      │  └─ No → Fall through
-      │
-      ↓
-┌──────────────────────────┐
-│   LIKE Fallback Search   │
-│   (Slower, unindexed)    │
-│   WHERE content LIKE '%python%' OR ...
-└──────────────────────────┘
-           ↓
-┌──────────────────────────┐
-│   Merge & Return Results │
-└──────────────────────────┘
+Query: "python decorators"
+       ↓
+┌──────────────────────────────────────────────────────┐
+│ Layer 1: FTS5 MATCH (Fast, Indexed)                  │
+│                                                       │
+│ SELECT id, url, title, content,                      │
+│        (-bm25(docs_fts, 5.0, 1.0)) AS rank          │
+│ FROM docs_fts                                        │
+│ WHERE docs_fts MATCH '"python"* OR "decorator*'     │
+│ ORDER BY rank DESC                                   │
+│                                                       │
+│ Title weight: 5× (matches in titles rank ~5× higher) │
+│ Result: 42 pages containing either token             │
+└──────────────────────────────────────────────────────┘
+       ↓
+    Found >= limit results? YES → Apply title bonus & return
+       ↓ NO → Fall through
+       ↓
+┌──────────────────────────────────────────────────────┐
+│ Layer 2: LIKE Fallback (Slower, Unindexed)          │
+│                                                       │
+│ SELECT id, url, title, content                       │
+│ FROM docs                                            │
+│ WHERE content LIKE '%python%' OR                     │
+│       title LIKE '%python%' OR                       │
+│       content LIKE '%decorator%' OR                  │
+│       title LIKE '%decorator%'                       │
+│                                                       │
+│ Result: 7 additional pages (full table scan)         │
+└──────────────────────────────────────────────────────┘
+       ↓
+    Merged results: 42 + 7 = 49 total
+       ↓
+┌──────────────────────────────────────────────────────┐
+│ Layer 3: Token Expansion (If still thin)            │
+│                                                       │
+│ If multi-word query returns < limit results:        │
+│   Try each token individually with penalty          │
+│   Rank: "python" → "decorator" → "python decorators"│
+│                                                       │
+│ Combined: 49 results                                 │
+└──────────────────────────────────────────────────────┘
+       ↓
+   Sort by composite score, return top N
 ```
 
-#### Fallback Chain
+#### Relevance Scoring (Ranking Algorithm)
 
-1. **FTS5 Search** (Primary)
-   - Fast: Uses index
-   - Boolean: `"python"* OR "async"*`
-   - Returns: Exact matches with relevance scoring
+Each result gets a composite score:
 
-2. **LIKE Fallback** (Secondary)
-   - Slower: Full table scan
-   - Pattern: `content LIKE '%python%' OR content LIKE '%async%'`
-   - Returns: Any document containing tokens
+```python
+# FTS5 BM25 ranking (lower numbers = better matches, so negated)
+fts_rank = -bm25(docs_fts, 5.0, 1.0)  # title_weight=5, content_weight=1
 
-3. **Empty Result Fallback**
-   - If both FTS and LIKE return < limit results
-   - Try to auto-ingest related documentation
-   - Example: Search for "scrapee" → auto-scrape scrapee GitHub/docs
+# Title bonus: +20 if query token found in title
+title_bonus = 20 if any(token in title.lower() for token in query.split()) else 0
+
+# Token expansion penalty: 0.7x for single-token expansions
+expansion_penalty = 0.7 if result_from_token_not_full_query else 1.0
+
+# Composite score (higher = better)
+relevance_score = (fts_rank + title_bonus) * expansion_penalty
+```
+
+**Example Ranking:**
+```
+Query: "python decorators"
+Results (sorted high-to-low):
+
+1. "Understanding Python Decorators"
+   - FTS rank: 8.5 (strong match)
+   - Title bonus: +20 (both tokens in title)
+   - Score: 28.5 ⭐⭐⭐
+
+2. "Advanced Python Patterns"
+   - FTS rank: 6.2 (good match on "python")
+   - Title bonus: +10 ("python" in title, no "decorators")
+   - Score: 16.2 ⭐⭐
+
+3. "Decorator Usage Guide"
+   - FTS rank: 5.1 (good match on "decorator")
+   - Title bonus: +10 ("decorator" in title, no "python")
+   - Score: 15.1 ⭐⭐
+
+4. "Python 3.10 Release Notes"
+   - FTS rank: 3.8 (weak match, "python" mentioned once)
+   - Title bonus: +20 ("python" in title)
+   - Score: 23.8 (but ranked 4th because content match weak)
+```
+
+### search_and_get() — Smart Single-Pass Search
+
+The `search_and_get()` method now does intelligent search without external retry loops:
+
+```python
+def search_and_get(query: str, limit: int = 5) -> list[dict]:
+    """
+    Single-pass smart search combining:
+    1. FTS5 + LIKE fallback
+    2. Title-match bonus
+    3. Token expansion for thin multi-word queries
+    """
+```
+
+**Algorithm:**
+
+1. **Primary search**: Run `search_docs()` with FTS5 + LIKE fallback
+   - Get up to `limit * 2` results
+   - Apply title bonuses and ranking
+
+2. **Quick filter**: Keep only results with `relevance_score >= threshold`
+   - If `>= limit` results → return immediately (fast path)
+
+3. **Expansion pass** (only if thin): For multi-word queries returning < limit:
+   - Try each token individually
+   - Penalise expansion results (0.7x score)
+   - Stop expanding once `>= limit` results reached
+
+4. **Final sort & trim**: Sort by composite score, return top `limit`
+
+**Example Execution:**
+
+```
+Query: "async await"
+Threshold: 1.0
+
+Step 1: FTS search
+  ✓ Found 8 results with score >= 1.0
+  → Return [result1, result2, ..., result8] (exceeds limit=5)
+  → Runtime: ~15ms
+
+Query: "obscure-library"
+Threshold: 1.0
+
+Step 1: FTS search
+  ✓ Found 0 results
+  → Fall through
+
+Step 2: Token expansion
+  ✓ Search for "obscure" → 3 results
+  ✓ Penalty: 3 * 0.7 = effective score ~2.1
+  ✓ Merge with FTS results → 3 total
+  → Return [result1, result2, result3] (under limit, but best effort)
+  → Runtime: ~40ms (one extra DB round-trip)
+
+OLD APPROACH (3× calls):
+  ✗ search_and_get("obscure-library") → 0 results
+  ✗ auto_scrape_related_docs() [external loop]
+  ✗ search_and_get("obscure-library") again → still 0
+  ✗ search_and_get("obscure") [fallback]
+  → Runtime: 200–500ms (3 DB calls, potential external I/O)
+```
+
+**Key Improvements:**
+- **Single DB round-trip**: No external retry loops
+- **Deterministic**: Always returns best results in one pass
+- **Fast path**: Thin queries exit early (< 20ms)
+- **Fallback built-in**: Token expansion doesn't require caller to retry
 
 ### Debug Logging
 
@@ -485,11 +642,119 @@ All search and storage operations include comprehensive debug logs:
 [DEBUG] Searching for: 'python' → FTS: '"python"*'
 [DEBUG] FTS found 42 results
 [DEBUG] LIKE found 5 additional results
-[DEBUG] Total: 47 results
+[DEBUG] Total: 47 results after dedup
 [DEBUG] Saving doc: 'https://example.com' with title: 'Example', content length: 5432
+[DEBUG] Content hash: 'abc123def456' (no near-dups found)
 [DEBUG] Created new doc id=123
-[DEBUG] Indexed in FTS5 with rowid=123
+[DEBUG] Indexed in FTS5 with rowid=123 (auto-synced via trigger)
+[DEBUG] search_and_get: 8 good results on first pass for 'python decorators'
 ```
+
+---
+
+## URL Intelligence
+
+### Domain-Aware URL Filtering & Scoring
+
+The `utils/url_intelligence.py` module provides two core capabilities:
+
+#### 1. URL Blocking (HARD Filter)
+
+**Universal Blocklist** — Applied to every domain:
+```
+/login, /logout, /signin, /signup, /register, /auth, /oauth
+/pricing, /plans, /billing, /subscribe, /enterprise, /careers
+/terms, /privacy, /cookie-policy, /legal
+/blog, /press, /events, /newsletter, /ebook, /download-pdf
+/feed, /rss, /sitemap, /robots.txt, /search, /explore, /trending
+```
+
+**Domain-Specific Blocklists** — GitHub example:
+```
+/stargazers, /watchers, /network, /forks, /followers
+/pulse, /graphs, /archive, /releases/download, /zipball, /tarball
+/compare, /actions, /projects, /packages, /security, /insights, /settings
+/deployments, /labels, /milestones, /sponsors, /marketplace
+```
+
+**File Extension Blocklist:**
+```
+.png, .jpg, .jpeg, .gif, .svg, .pdf, .zip, .tar, .gz
+.css (stylesheets, no content), .js/.ts (raw source, not prose)
+.map, .woff, .ttf, .mp4, .mp3, etc.
+```
+
+#### 2. URL Scoring (0–100)
+
+Each allowed URL gets a score that influences crawl priority:
+
+**Base Score:** 50
+
+**Modifiers:**
+```python
+# Same-domain: +20, Cross-domain: -30
+# Path quality (first match wins):
+#   /readme, /getting-started, /quickstart, /introduction  → +30
+#   /docs, /documentation, /guide, /manual, /reference, /api  → +25
+#   /wiki, /handbook, /playbook  → +22
+#   /example, /sample, /demo, /tutorial  → +15
+#   /changelog, /migration, /release-notes  → +10
+#   /installation, /setup, /configuration  → +10
+#   /concept, /architecture, /design  → +8
+#   /faq, /troubleshoot, /debug  → +5
+
+# Penalties:
+#   Paginated results (?page=N)  → -10
+#   Old version docs (/v1.0.0/)  → -5
+#   Test/spec files (/tests/, /specs/)  → -15
+#   Binary/media files  → -50
+
+# Depth penalty:
+#   Very deep paths (>6 segments)  → -5
+#   Shallow paths (≤2 segments)  → +5
+
+Final = max(0, min(100, base + modifiers))
+```
+
+**Usage:**
+```python
+from utils.url_intelligence import URLIntelligence
+
+intel = URLIntelligence(seed_url="https://github.com/user/repo")
+
+# Check if URL should be crawled at all
+if intel.is_allowed("https://github.com/user/repo/blob/main/README.md"):
+    print("✓ Allowed")
+else:
+    print("✗ Blocked (login page, etc.)")
+
+# Get priority score
+score = intel.score("https://github.com/user/repo/wiki/Home")
+print(f"Score: {score}/100")  # ~85
+
+# Filter and rank a list of URLs
+urls = [
+    "https://github.com/user/repo/docs/guide.md",
+    "https://github.com/user/repo/login",
+    "https://github.com/user/repo/blob/main/tests/test.py",
+    "https://github.com/user/repo/wiki/FAQ",
+]
+ranked = intel.filter_and_rank(urls)
+# Returns: [docs/guide.md, wiki/FAQ] in order (login and tests blocked)
+
+# Human-readable category
+category = intel.categorise("https://github.com/user/repo/docs/guide.md")
+print(category)  # "excellent" (score >= 80)
+```
+
+**Categories:**
+| Category | Score Range | Crawl Priority |
+|----------|-------------|-----------------|
+| excellent | 80–100 | Highest (crawl first) |
+| good | 60–79 | High |
+| ok | 45–59 | Medium |
+| low | 20–44 | Low |
+| skip | 0–19 | Lowest (crawl last or not at all) |
 
 ---
 
@@ -497,25 +762,80 @@ All search and storage operations include comprehensive debug logs:
 
 Scrapee includes multiple scraping strategies for different use cases.
 
-### SmartCrawler (Recommended)
+### SmartCrawler (Recommended) — v2 with Scored Priority Queue
 
-Intelligent crawling with heuristic depth control and link prioritization.
+Intelligent crawling with **priority-queue-based URL ordering** instead of breadth-first. Fetches the highest-quality documentation pages first, avoiding junk (login pages, GitHub metadata, etc.).
 
-**Features:**
-- Intelligent link discovery and prioritization
-- Automatic depth limiting based on URL structure
-- Handles 404s and redirects gracefully
-- Extracts title, metadata, content
-- Parses code blocks with language detection
-- Retry logic for transient failures
+**New Features (v2):**
+- **Scored priority queue**: Every discovered URL is scored 0–100 and processed in descending order
+  - Documentation pages (`/docs`, `/wiki`, `/readme`) → high score (80–100)
+  - GitHub metadata (`/stargazers`, `/settings`, `/graphs`) → blocked entirely
+  - Navigation/auth (`/login`, `/signup`, `/pricing`) → blocked on all domains
+  - Paginated results, old versions → penalised (low score)
+- **Domain-aware filtering**: Hard blocklist for junk (via [utils/url_intelligence.py](#url-intelligence))
+  - Universal blocks: `/login`, `/signup`, `/pricing`, `/careers`, `/terms`, `/security`, etc.
+  - GitHub-specific blocks: `/stargazers`, `/watchers`, `/graphs`, `/settings`, `/insights`, `/trending`
+  - Prevents crawler from ever requesting these URLs
+- **Early exit**: If `min_good_docs` high-quality pages found, stop crawling even if max_pages not reached
+- **Per-domain budget**: Cross-domain crawl is capped (default: 3 pages per off-seed domain)
+- **Adaptive delay**: Avoids hammering a single server
 
-**Strategy:**
-1. Start from seed URL
-2. Extract all links from page
-3. Filter: Internal links only, avoid duplicates
-4. Prioritize: Breadth-first with relevance hinting
-5. Stop when: Max pages reached OR depth limit
-6. Return: Parsed documents with extracted code
+**How it Works:**
+```
+1. Start from seed URL (high score by default)
+2. For each page fetched:
+   a. Extract all links
+   b. Score each link via URLIntelligence (0–100)
+   c. Filter out blocked URLs (login, signup, etc.)
+   d. Push high-score URLs to priority heap
+3. Pop highest-scored URL from heap next
+4. Early-exit when enough good docs found
+5. Return results ranked by URL score (best first)
+```
+
+**Scoring Algorithm:**
+```python
+base_score = 50
+# Same-domain bonus (+20) / cross-domain penalty (-30)
+# Path quality: /docs, /wiki, /readme (+30), /api, /guide (+25), etc.
+# Penalties: paginated results (-10), old versions (-5), test files (-15)
+# Depth penalty: very deep paths (-5)
+Final score = max(0, min(100, base_score + bonuses + penalties))
+```
+
+**Example Scores:**
+| URL | Score | Reason |
+|-----|-------|--------|
+| `https://github.com/user/repo/blob/main/docs/guide.md` | ~90 | Same domain, `/docs` keyword, prime path |
+| `https://github.com/user/repo/wiki/Home` | ~85 | Same domain, `/wiki` keyword |
+| `https://github.com/user/repo/stargazers` | **0** | Blocked (GitHub metadata) |
+| `https://github.com/user/repo/blob/main/tests/fixtures/data.json` | ~5 | Same domain, but test file (penalised) |
+| `https://example.com/pricing` | **0** | Blocked (marketing noise) |
+
+**Configuration:**
+```python
+crawler = SmartCrawler(
+    timeout=15,
+    delay_between_requests=0.3,  # 300ms between requests
+    min_good_docs=5,              # early-exit after 5 high-quality docs
+    cross_domain_budget=3,        # max 3 pages from any off-seed domain
+)
+
+results = crawler.crawl(
+    seed_url="https://github.com/user/repo",
+    max_pages=30,
+    max_depth=3,
+)
+```
+
+**Why v2 is Better:**
+- **Old (BFS)**: Crawled pages in discovery order → fetched junk early
+  - Example: `/` → `/features` → `/pricing` → `/docs` (docs last!)
+  - Crawled 30 pages, got 5 good docs
+- **New (Scored)**: Crawls pages by quality → fetches docs first
+  - Example: `/docs` → `/wiki` → `/api` → `/guide` (docs first!)
+  - Crawls 30 pages, gets 20 good docs
+  - **Early exit**: Stops at page 8 if min_good_docs=5 reached
 
 ### SeleniumCrawler
 
