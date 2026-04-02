@@ -62,7 +62,7 @@ from typing import Optional
 MIN_QUALITY_SCORE: int = 20
 
 # A page is rejected if its cleaned prose is shorter than this (characters)
-MIN_PROSE_CHARS: int = 120
+MIN_PROSE_CHARS: int = 80
 
 # Stored content is capped at this many characters (prevents huge pages)
 MAX_CONTENT_CHARS: int = 50_000

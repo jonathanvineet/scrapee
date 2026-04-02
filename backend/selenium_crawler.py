@@ -118,50 +118,61 @@ class SeleniumCrawler:
                     continue
 
                 # Extract structured data from HTML for ContentFilter
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(html, "html.parser")
-                
-                # Extract title
-                title = ""
-                title_tag = soup.find("title")
-                if title_tag:
-                    title = title_tag.get_text().strip()
-                
-                # Extract meta description
-                meta_desc = ""
-                meta_tag = soup.find("meta", attrs={"name": "description"})
-                if meta_tag and meta_tag.get("content"):
-                    meta_desc = meta_tag.get("content").strip()
-                
-                # Extract paragraphs
-                paragraphs = []
-                for p in soup.find_all("p"):
-                    text = p.get_text().strip()
-                    if len(text) > 20:  # Skip very short paragraphs
-                        paragraphs.append(text)
-                
-                # Extract headings
-                headings = []
-                for heading in soup.find_all(["h1", "h2", "h3", "h4"]):
-                    text = heading.get_text().strip()
-                    if len(text) > 0:
-                        headings.append({
-                            "level": heading.name,
-                            "text": text
-                        })
-                
-                # Count links
-                links_count = len(soup.find_all("a", href=True))
-                
-                # Extract code blocks
-                code_blocks = []
-                for code in soup.find_all(["code", "pre"]):
-                    snippet = code.get_text().strip()
-                    if len(snippet) > 0:
-                        code_blocks.append({
-                            "snippet": snippet[:500],  # Limit size
-                            "language": ""
-                        })
+                try:
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(html, "html.parser")
+                    
+                    # Extract title
+                    title = ""
+                    title_tag = soup.find("title")
+                    if title_tag:
+                        title = title_tag.get_text().strip()
+                    
+                    # Extract meta description
+                    meta_desc = ""
+                    meta_tag = soup.find("meta", attrs={"name": "description"})
+                    if meta_tag and meta_tag.get("content"):
+                        meta_desc = meta_tag.get("content").strip()
+                    
+                    # Extract paragraphs
+                    paragraphs = []
+                    for p in soup.find_all("p"):
+                        text = p.get_text().strip()
+                        if len(text) > 20:  # Skip very short paragraphs
+                            paragraphs.append(text)
+                    
+                    # Extract headings
+                    headings = []
+                    for heading in soup.find_all(["h1", "h2", "h3", "h4"]):
+                        text = heading.get_text().strip()
+                        if len(text) > 0:
+                            headings.append({
+                                "level": heading.name,
+                                "text": text
+                            })
+                    
+                    # Count links
+                    links_count = len(soup.find_all("a", href=True))
+                    
+                    # Extract code blocks
+                    code_blocks = []
+                    for code in soup.find_all(["code", "pre"]):
+                        snippet = code.get_text().strip()
+                        if len(snippet) > 0:
+                            code_blocks.append({
+                                "snippet": snippet[:500],  # Limit size
+                                "language": ""
+                            })
+                except Exception as e:
+                    # Fallback: if extraction fails, return raw content
+                    import sys
+                    print(f"WARNING: Failed to extract structured data from {current_url}: {e}", file=sys.stderr)
+                    title = ""
+                    meta_desc = ""
+                    paragraphs = []
+                    headings = []
+                    links_count = 0
+                    code_blocks = []
 
                 self.data[current_url] = {
                     "url": current_url,
