@@ -4,6 +4,55 @@ A full-stack web scraping and document search system with Model Context Protocol
 
 ---
 
+## Recent Changes (v2.0 Release)
+
+### Problem 1: Crawler Fetching Junk Pages
+**Symptom:** Crawler visited GitHub metadata pages (`/stargazers`, `/watchers`, `/settings`), signup pages, pricing pages, etc. instead of documentation.
+
+**Root Cause:** BFS traversal had no quality filter — visited links in discovery order, not by content value.
+
+**Solution:** `utils/url_intelligence.py` + SmartCrawler v2 priority queue
+- **Hard blocklists**: `/login`, `/signup`, `/pricing`, `/careers` blocked on ALL domains
+- **Domain-specific blocks**: GitHub gets `/stargazers`, `/watchers`, `/graphs`, `/settings`, etc.
+- **URL scoring**: Each link scored 0–100 before entering queue
+  - Docs pages (+30), APIs (+25), examples (+15) = high priority
+  - Test files (-15), old versions (-5), media (-50) = low priority
+- **Priority queue**: Always pop highest-scored URL next (not BFS)
+
+**Result:** Documentation pages crawled first, junk never requested.
+
+### Problem 2: Agent Calling search_and_get() 3× Unnecessarily
+**Symptom:** MCP tool `search_and_get()` returned nothing, caller would retry with variations, external loop tried auto-scraping, then retry search again. 200–500ms wasted.
+
+**Root Cause:** Search did FTS5 query, fell back if empty, but caller had to implement retry loop.
+
+**Solution:** `sqlite_store.py` smart `search_and_get()` single-pass algorithm
+- **Layer 1 (FTS5)**: Fast indexed search with BM25 ranking + title bonuses
+  - Query: `"python"* OR "async"*` (OR logic, forgiving)
+  - Results ranked: title matches +20 bonus
+- **Layer 2 (LIKE)**: Fallback full-table scan if FTS returns few results
+- **Layer 3 (Token Expansion)**: For multi-word queries returning < limit:
+  - Try individual tokens with 0.7x penalty
+  - Merge all results, sort by composite score
+
+**In one function call:**
+```python
+results = store.search_and_get("async await", limit=5)
+# Returns best effort: FTS results + LIKE fallback + token expansion
+# All in ~20–40ms, no external loops
+```
+
+**Result:** Single DB round-trip, always returns best effort results.
+
+### Backward Compatibility
+
+All changes are backward compatible:
+- SmartCrawler falls back to heuristics if `url_intelligence` unavailable
+- Database schema extended (not changed) — existing data readable
+- API signatures identical — old code still works
+
+---
+
 ## Table of Contents
 
 1. [System Overview](#system-overview)
