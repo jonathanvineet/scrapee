@@ -44,6 +44,11 @@ class ScrapedDocument:
     domain: str = ""
     depth: int = 0
     score: int = 0                  # URL score at crawl time
+    # Fields for ContentFilter
+    paragraphs: list[str] = field(default_factory=list)
+    headings: list[dict] = field(default_factory=list)
+    links_count: int = 0
+    meta_description: str = ""
 
     def __bool__(self) -> bool:
         return bool(self.content and len(self.content) > 50)
@@ -75,7 +80,42 @@ def _extract_title(soup: BeautifulSoup) -> str:
     return ""
 
 
-def _extract_prose(soup: BeautifulSoup) -> str:
+def _extract_meta_description(soup: BeautifulSoup) -> str:
+    """Extract meta description if present."""
+    meta = soup.find("meta", attrs={"name": "description"})
+    if meta and meta.get("content"):
+        return meta["content"]
+    return ""
+
+
+def _extract_headings(soup: BeautifulSoup) -> list[dict]:
+    """Extract heading hierarchy (h1, h2, h3, etc.)."""
+    headings = []
+    for heading in soup.find_all(re.compile(r"^h[1-6]$")):
+        text = heading.get_text(strip=True)
+        if text and len(text) > 2:
+            headings.append({
+                "level": heading.name,
+                "text": text[:200]
+            })
+    return headings
+
+
+def _extract_paragraphs(soup: BeautifulSoup) -> list[str]:
+    """Extract paragraph text for content analysis."""
+    paragraphs = []
+    
+    # Remove noise tags
+    soup_copy = BeautifulSoup(str(soup), "html.parser")
+    for tag in soup_copy(list(_NOISE_TAGS)):
+        tag.decompose()
+    
+    for p in soup_copy.find_all("p"):
+        text = p.get_text(strip=True)
+        if len(text) > 20:  # Skip stubs
+            paragraphs.append(text)
+    
+    return paragraphs
     """Extract human-readable text, stripping nav/footer noise."""
     # Remove noise tags in-place
     for tag in soup(list(_NOISE_TAGS)):
@@ -310,6 +350,10 @@ class SmartCrawler:
             links = _extract_links(soup, url)
             prose = _extract_prose(soup)
             code_blocks = _extract_code_blocks(soup)
+            # Extract structured fields for ContentFilter
+            paragraphs = _extract_paragraphs(soup)
+            headings = _extract_headings(soup)
+            meta_desc = _extract_meta_description(soup)
         except Exception as exc:
             logger.warning("Parse failed %s: %s", url, exc)
             return None
@@ -328,6 +372,11 @@ class SmartCrawler:
             domain=domain,
             depth=depth,
             score=score,
+            # ContentFilter fields
+            paragraphs=paragraphs,
+            headings=headings,
+            links_count=len(links),
+            meta_description=meta_desc,
         )
         logger.info(
             "[score=%d depth=%d] %s — %d chars, %d codes",

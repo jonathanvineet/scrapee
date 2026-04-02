@@ -170,11 +170,18 @@ def scrape():
       smart    → SmartCrawler (intelligent priority queue, early exit at 5 good docs, max 30 pages)
       pipeline → UltraFastCrawler (threaded concurrent crawling, max 50 pages)
       selenium → SeleniumCrawler (full JS rendering)
+    
+    All raw pages are FILTERED through ContentFilter before storage:
+      - Rejects nav/index pages (8+ links per paragraph)
+      - Rejects marketing pages (50%+ CTAs)
+      - Strips boilerplate and low-quality sections
+      - Never stores raw links/images, only prose content
     """
     if request.method == "OPTIONS":
         return "", 204
 
     from mcp import SmartCrawler, SeleniumCrawler, UltraFastCrawler
+    from content_filter import ContentFilter
 
     try:
         data = request.get_json()
@@ -190,7 +197,10 @@ def scrape():
             return jsonify({"error": "urls must be a non-empty list", "status": "failed"}), 400
 
         store = get_sqlite_store()
+        content_filter = ContentFilter()
         all_results = []
+        total_pages_scraped = 0
+        total_pages_rejected = 0
 
         for start_url in urls:
             try:
@@ -203,6 +213,7 @@ def scrape():
                     continue
 
                 # ========== CRAWL BASED ON MODE ==========
+                raw_pages = []
                 
                 if mode == "selenium":
                     # Full JS rendering via Selenium
@@ -210,6 +221,9 @@ def scrape():
                         return jsonify({"error": "SeleniumCrawler not available", "status": "failed"}), 422
                     crawler = SeleniumCrawler(start_url=start_url, max_depth=max_depth)
                     raw = crawler.crawl()
+                    # Convert dict to list of page dicts {url, content, ...}
+                    if isinstance(raw, dict):
+                        raw_pages = [{"url": k, "content": v} for k, v in raw.items()]
                     
                 elif mode == "pipeline":
                     # Multi-threaded concurrent crawling, bounded to 50 pages
@@ -219,56 +233,97 @@ def scrape():
                     # Add max_pages limit to prevent unbounded crawling
                     crawler.max_pages = 50
                     raw = crawler.crawl()
+                    # Convert dict to list of page dicts
+                    if isinstance(raw, dict):
+                        raw_pages = [{"url": k, "content": v} for k, v in raw.items()]
                     
                 else:
-                    # Default: Smart priority-queue crawling (SMART/GHOST_PROTOCOL)
+                    # Default: Smart priority-queue crawling (GHOST_PROTOCOL)
                     if SmartCrawler is None:
                         return jsonify({"error": "SmartCrawler not available", "status": "failed"}), 422
-                    # SmartCrawler doesn't take start_url in __init__, only in crawl()
                     crawler = SmartCrawler(
                         timeout=15,
                         delay_between_requests=0.3,
                         min_good_docs=5,
                         cross_domain_budget=3,
                     )
-                    # Call crawl with seed_url and limits
+                    # SmartCrawler.crawl() returns list[ScrapedDocument] with ContentFilter fields
                     raw = crawler.crawl(seed_url=start_url, max_pages=30, max_depth=max_depth)
-                    # Convert list[ScrapedDocument] to dict format for compatibility
+                    # Convert ScrapedDocument objects to dicts
                     if isinstance(raw, list):
-                        raw = {doc.url: f"<h1>{doc.title}</h1>\n{doc.content}" for doc in raw}
+                        raw_pages = [
+                            {
+                                "url": doc.url,
+                                "title": doc.title,
+                                "content": doc.content,
+                                "meta_description": doc.meta_description,
+                                "paragraphs": doc.paragraphs,
+                                "headings": doc.headings,
+                                "code_blocks": doc.code_blocks,
+                                "links_count": doc.links_count,
+                            }
+                            for doc in raw
+                        ]
                 
-                if not raw:
-                    all_results.append({"url": start_url, "error": "No content scraped", "status": "failed"})
+                total_pages_scraped += len(raw_pages)
+                
+                if not raw_pages:
+                    all_results.append({
+                        "url": start_url,
+                        "error": "No content scraped",
+                        "status": "failed"
+                    })
                     continue
 
-                for page_url, html in raw.items():
-                    if not html:
-                        all_results.append({"url": page_url, "error": "Empty response", "status": "failed"})
-                        continue
+                # ========== FILTER PAGES THROUGH CONTENT FILTER ==========
+                filtered_pages = content_filter.process_batch(raw_pages)
+                total_pages_rejected += len(raw_pages) - len(filtered_pages)
 
-                    parsed = parse_html(page_url, html, mode)
-                    all_results.append(parsed)
+                # Store filtered pages only
+                indexed_count = 0
+                for parsed in filtered_pages:
+                    try:
+                        doc_id = store.save_doc(
+                            url=parsed.get("url", ""),
+                            title=parsed.get("title", ""),
+                            content=parsed.get("content", ""),
+                        )
+                        if doc_id:
+                            indexed_count += 1
+                            all_results.append({
+                                "url": parsed.get("url", ""),
+                                "title": parsed.get("title", ""),
+                                "status": "indexed",
+                                "quality_score": parsed.get("quality_score", 0),
+                            })
+                    except Exception as store_err:
+                        app.logger.warning(f"Failed to store {parsed.get('url')}: {store_err}")
 
-                    content_text = parsed.get("title", "") + "\n\n"
-                    for p in parsed.get("paragraphs", [])[:20]:
-                        content_text += p + "\n"
-
-                    store.save_doc(page_url, content_text, metadata=parsed)
+                if indexed_count == 0:
+                    all_results.append({
+                        "url": start_url,
+                        "error": f"All {len(raw_pages)} pages rejected by content filter (low quality)",
+                        "status": "failed"
+                    })
 
             except Exception as e:
+                app.logger.error(f"Error crawling {start_url}: {e}")
                 all_results.append({"url": start_url, "error": str(e), "status": "error"})
 
         return jsonify({
             "status": "success",
             "mode": mode,
             "urls_processed": len(urls),
-            "pages_scraped": len([r for r in all_results if "error" not in r]),
+            "pages_scraped": total_pages_scraped,
+            "pages_rejected_by_filter": total_pages_rejected,
+            "pages_indexed": len([r for r in all_results if r.get("status") == "indexed"]),
             "output_format": output_format,
             "data": all_results,
         }), 200
 
     except Exception as e:
         import traceback
+        app.logger.error(f"Fatal scrape error: {e}\n{traceback.format_exc()}")
         return jsonify({
             "error": str(e),
             "status": "failed",
