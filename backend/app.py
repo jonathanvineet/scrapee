@@ -290,8 +290,8 @@ def scrape():
                     try:
                         doc_id = store.save_doc(
                             url=parsed.get("url", ""),
-                            title=parsed.get("title", ""),
                             content=parsed.get("content", ""),
+                            metadata={"title": parsed.get("title", ""), "quality_score": parsed.get("quality_score", 0)},
                         )
                         if doc_id:
                             indexed_count += 1
