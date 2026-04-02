@@ -23,7 +23,7 @@ from urllib.parse import urljoin, urlparse, urlunparse
 import requests
 from bs4 import BeautifulSoup
 
-from utils.url_intelligence import URLIntelligence
+from url_intelligence import URLIntelligence
 
 logger = logging.getLogger(__name__)
 
