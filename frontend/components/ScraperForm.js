@@ -7,20 +7,20 @@ const MODES = [
   {
     value: 'smart',
     label: 'GHOST_PROTOCOL',
-    description: 'Tries lightweight HTTP requests first. If the page requires JavaScript rendering, automatically upgrades to a headless browser. Best balance of speed and compatibility.',
-    tags: ['adaptive', 'js-fallback', 'recommended'],
+    description: 'Intelligent priority-queue crawling: scores every discovered link and fetches high-quality pages first (docs, guides, examples). Uses early-exit to stop at ~5 good docs. Ideal for documentation sites.',
+    tags: ['smart-queue', 'early-exit', 'recommended'],
   },
   {
     value: 'pipeline',
     label: 'SWARM_ROUTINE',
-    description: 'Spawns 8 concurrent worker threads to crawl multiple pages simultaneously. Ideal for large sites where speed matters more than deep JS rendering.',
-    tags: ['threaded', 'concurrent', 'fast'],
+    description: 'Multi-threaded concurrent crawling with 8 parallel workers. Fetches up to 50 pages fast, ideal for broad discovery across large sites. Less intelligent but more coverage.',
+    tags: ['concurrent', 'multi-worker', 'fast-breadth'],
   },
   {
-    value: 'fast',
+    value: 'selenium',
     label: 'DEEP_RENDER',
-    description: 'Runs every page through a full headless Chrome browser. Guarantees accurate results for heavily JavaScript-driven sites. Slower but most thorough.',
-    tags: ['selenium', 'headless-chrome', 'accurate'],
+    description: 'Headless Chrome browser rendering for every page. Guarantees accurate content for JavaScript-heavy sites. Slower but most thorough for complex applications.',
+    tags: ['chrome', 'javascript', 'accurate'],
   },
 ];
 

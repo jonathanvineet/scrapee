@@ -578,7 +578,19 @@ class MCPServer:
             return {"error": f"crawler mode '{mode}' is unavailable", "url": url, "mode": mode}
 
         try:
-            pages = self._run_with_timeout(crawler.crawl, timeout=SCRAPE_TIMEOUT_SECONDS)
+            # SmartCrawler needs seed_url passed to crawl() method
+            # Other crawlers store start_url in __init__, so crawl() takes no args
+            if isinstance(crawler, SmartCrawler):
+                crawl_callback = lambda: crawler.crawl(
+                    seed_url=url,
+                    max_pages=30,
+                    max_depth=max_depth
+                )
+            else:
+                # For other crawlers (Selenium, UltraFast), crawl() is parameter-less
+                crawl_callback = crawler.crawl
+            
+            pages = self._run_with_timeout(crawl_callback, timeout=SCRAPE_TIMEOUT_SECONDS)
         except TimeoutException:
             return {"error": "timeout", "url": url, "mode": mode, "pages_scraped": 0, "stored_urls": [], "skipped": []}
         except Exception as exc:
@@ -708,12 +720,35 @@ class MCPServer:
     # ------------------------------------------------------------------ #
 
     def _build_crawler(self, mode: str, url: str, max_depth: int):
+        """
+        Build a crawler configured for the given mode.
+        
+        Modes:
+        - 'smart' (GHOST_PROTOCOL): SmartCrawler with scored priority queue, early exit
+        - 'pipeline' (SWARM_ROUTINE): UltraFastCrawler with multiple workers, bounded to 50 pages
+        - 'selenium' (DEEP_RENDER): SeleniumCrawler with JS rendering
+        - 'fast' / other: Fallback to SmartCrawler
+        """
         if mode == "selenium" and SELENIUM_AVAILABLE:
             return SeleniumCrawler(start_url=url, max_depth=max_depth)
-        if mode == "ultrafast" and ULTRAFAST_AVAILABLE:
-            return UltraFastCrawler(start_url=url, max_depth=max_depth, max_workers=4)
+        
+        if mode == "pipeline" and ULTRAFAST_AVAILABLE:
+            # SWARM_ROUTINE: Concurrent crawling, bounded to 50 pages max
+            # (prevents infinite crawling of large sites)
+            crawler = UltraFastCrawler(start_url=url, max_depth=max_depth, max_workers=8)
+            crawler.max_pages = 50  # Limit swarm to reasonable page count
+            return crawler
+        
         if SMART_CRAWLER_AVAILABLE:
-            return SmartCrawler(start_url=url, max_depth=max_depth)
+            # GHOST_PROTOCOL or fallback: Smart priority queue with early exit
+            # Returns crawler ready for crawler.crawl(seed_url, max_pages, max_depth)
+            return SmartCrawler(
+                timeout=15,
+                delay_between_requests=0.3,
+                min_good_docs=5,
+                cross_domain_budget=3,
+            )
+        
         return None
 
     def _validate_scrape_url(self, url: str) -> Tuple[bool, str]:
