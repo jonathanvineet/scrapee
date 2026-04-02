@@ -59,7 +59,7 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 
 # A page is rejected if its quality score is below this
-MIN_QUALITY_SCORE: int = 30
+MIN_QUALITY_SCORE: int = 20
 
 # A page is rejected if its cleaned prose is shorter than this (characters)
 MIN_PROSE_CHARS: int = 120

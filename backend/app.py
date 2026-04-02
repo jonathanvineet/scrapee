@@ -221,9 +221,9 @@ def scrape():
                         return jsonify({"error": "SeleniumCrawler not available", "status": "failed"}), 422
                     crawler = SeleniumCrawler(start_url=start_url, max_depth=max_depth)
                     raw = crawler.crawl()
-                    # Convert dict to list of page dicts {url, content, ...}
+                    # Now returns dicts with structured data {url, title, content, paragraphs, headings, etc}
                     if isinstance(raw, dict):
-                        raw_pages = [{"url": k, "content": v} for k, v in raw.items()]
+                        raw_pages = [v if isinstance(v, dict) else {"url": k, "content": v} for k, v in raw.items()]
                     
                 elif mode == "pipeline":
                     # Multi-threaded concurrent crawling, bounded to 50 pages
@@ -233,9 +233,9 @@ def scrape():
                     # Add max_pages limit to prevent unbounded crawling
                     crawler.max_pages = 50
                     raw = crawler.crawl()
-                    # Convert dict to list of page dicts
+                    # Now returns dicts with structured data {url, title, content, paragraphs, headings, etc}
                     if isinstance(raw, dict):
-                        raw_pages = [{"url": k, "content": v} for k, v in raw.items()]
+                        raw_pages = [v if isinstance(v, dict) else {"url": k, "content": v} for k, v in raw.items()]
                     
                 else:
                     # Default: Smart priority-queue crawling (GHOST_PROTOCOL)
