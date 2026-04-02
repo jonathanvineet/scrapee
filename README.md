@@ -4,7 +4,25 @@ A full-stack web scraping and document search system with Model Context Protocol
 
 ---
 
-## Recent Changes (v2.0 Release)
+## Recent Changes (v2.0 Release & Bug Fixes)
+
+### Bug Fix: Crawler Mode Imbalance (April 3, 2026)
+**Symptom:** GHOST_PROTOCOL (smart) returned 1 page, SWARM_ROUTINE (pipeline) returned ALL pages.
+
+**Root Cause:** SmartCrawler was being initialized incorrectly in `/api/scrape`:
+- Passing `start_url` to `__init__()` instead of `crawl()` method
+- Calling `crawl()` without required parameters (seed_url, max_pages)
+- UltraFastCrawler had no max_pages limit (unbounded crawl)
+
+**Solution:** Fixed `backend/app.py` to:
+1. Initialize SmartCrawler with config only: `SmartCrawler(timeout=15, delay_between_requests=0.3, min_good_docs=5, cross_domain_budget=3)`
+2. Call `crawl(seed_url=url, max_pages=30, max_depth=max_depth)` with proper parameters
+3. Cap UltraFastCrawler at `max_pages=50`
+
+**Result:** 
+- GHOST_PROTOCOL: 30 pages max with early exit at 5 good docs (~8 pages typical)
+- SWARM_ROUTINE: 50 pages max with 8 parallel workers
+- DEEP_RENDER: Full JS rendering per page
 
 ### Problem 1: Crawler Fetching Junk Pages
 **Symptom:** Crawler visited GitHub metadata pages (`/stargazers`, `/watchers`, `/settings`), signup pages, pricing pages, etc. instead of documentation.
