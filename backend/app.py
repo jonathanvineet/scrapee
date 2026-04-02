@@ -181,7 +181,6 @@ def scrape():
         return "", 204
 
     from mcp import SmartCrawler, SeleniumCrawler, UltraFastCrawler
-    from content_filter import ContentFilter
 
     try:
         data = request.get_json()
@@ -197,10 +196,8 @@ def scrape():
             return jsonify({"error": "urls must be a non-empty list", "status": "failed"}), 400
 
         store = get_sqlite_store()
-        content_filter = ContentFilter()
         all_results = []
         total_pages_scraped = 0
-        total_pages_rejected = 0
 
         for start_url in urls:
             try:
@@ -275,18 +272,14 @@ def scrape():
                     })
                     continue
 
-                # ========== FILTER PAGES THROUGH CONTENT FILTER ==========
-                filtered_pages = content_filter.process_batch(raw_pages)
-                total_pages_rejected += len(raw_pages) - len(filtered_pages)
-
-                # Store filtered pages only
+                # Store ALL pages without filtering
                 indexed_count = 0
-                for parsed in filtered_pages:
+                for parsed in raw_pages:
                     try:
                         doc_id = store.save_doc(
                             url=parsed.get("url", ""),
                             content=parsed.get("content", ""),
-                            metadata={"title": parsed.get("title", ""), "quality_score": parsed.get("quality_score", 0)},
+                            metadata={"title": parsed.get("title", "")},
                         )
                         if doc_id:
                             indexed_count += 1
@@ -294,7 +287,6 @@ def scrape():
                                 "url": parsed.get("url", ""),
                                 "title": parsed.get("title", ""),
                                 "status": "indexed",
-                                "quality_score": parsed.get("quality_score", 0),
                             })
                     except Exception as store_err:
                         app.logger.warning(f"Failed to store {parsed.get('url')}: {store_err}")
@@ -302,7 +294,7 @@ def scrape():
                 if indexed_count == 0:
                     all_results.append({
                         "url": start_url,
-                        "error": f"All {len(raw_pages)} pages rejected by content filter (low quality)",
+                        "error": f"Failed to index {len(raw_pages)} pages",
                         "status": "failed"
                     })
 
@@ -315,7 +307,6 @@ def scrape():
             "mode": mode,
             "urls_processed": len(urls),
             "pages_scraped": total_pages_scraped,
-            "pages_rejected_by_filter": total_pages_rejected,
             "pages_indexed": len([r for r in all_results if r.get("status") == "indexed"]),
             "output_format": output_format,
             "data": all_results,

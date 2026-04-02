@@ -23,11 +23,7 @@ from urllib.parse import urljoin, urlparse, urlunparse
 import requests
 from bs4 import BeautifulSoup
 
-try:
-    from utils.url_intelligence import URLIntelligence
-except ImportError:
-    # Fallback if import fails
-    URLIntelligence = None
+from utils.url_intelligence import URLIntelligence
 
 logger = logging.getLogger(__name__)
 
@@ -240,15 +236,14 @@ class SmartCrawler:
         Returns a list of ScrapedDocument, sorted by URL score descending
         (highest quality first).
         """
-        intel = URLIntelligence(seed_url) if URLIntelligence else None
+        intel = URLIntelligence(seed_url)
         visited: set[str] = set()
         domain_counts: dict[str, int] = {}
         heap: list[_QueueEntry] = []
         results: list[ScrapedDocument] = []
-        good_doc_count = 0
 
         # Seed
-        seed_score = 80 if not intel else intel.score(seed_url)
+        seed_score = intel.score(seed_url)
         heapq.heappush(heap, _QueueEntry(-seed_score, 0, seed_url))
 
         logger.info("SmartCrawler starting: seed=%s max_pages=%d max_depth=%d",
@@ -283,36 +278,18 @@ class SmartCrawler:
             doc, child_links = result
             if doc:
                 results.append(doc)
-                if score >= 60:
-                    good_doc_count += 1
-                    if good_doc_count >= self.min_good_docs and depth > 1:
-                        logger.info(
-                            "Early exit: %d high-quality docs found at depth %d",
-                            good_doc_count, depth,
-                        )
-                        # Don't hard-stop — keep draining same depth level
-                        max_pages = len(results) + max(5, max_pages // 4)
 
-                # Discover and enqueue child links
-                if depth < max_depth and intel:
+                # Discover and enqueue ALL child links (no filtering)
+                if depth < max_depth:
                     ranked = intel.filter_and_rank(child_links)
                     for child_url in ranked:
                         child_norm = _normalise_url(child_url)
                         if child_norm not in visited:
                             child_score = intel.score(child_url)
-                            if child_score >= 30:   # skip very low-value links
-                                heapq.heappush(
-                                    heap,
-                                    _QueueEntry(-child_score, depth + 1, child_url),
-                                )
-                elif depth < max_depth:
-                    # Fallback: no URL intelligence, use basic heuristics
-                    for child_url in child_links:
-                        child_norm = _normalise_url(child_url)
-                        if child_norm not in visited and "/docs/" in child_url or "/wiki/" in child_url:
+                            # Add all links with reasonable scores
                             heapq.heappush(
                                 heap,
-                                _QueueEntry(-75, depth + 1, child_url),
+                                _QueueEntry(-child_score, depth + 1, child_url),
                             )
 
             time.sleep(self.delay)
@@ -320,8 +297,8 @@ class SmartCrawler:
         # Sort final results: highest-score docs first
         results.sort(key=lambda d: d.score, reverse=True)
         logger.info(
-            "Crawl complete: %d pages fetched, %d good docs",
-            len(results), good_doc_count,
+            "Crawl complete: %d pages fetched",
+            len(results),
         )
         return results
 
