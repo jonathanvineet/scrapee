@@ -362,6 +362,101 @@ class SmartScraper:
         text = re.sub(r" +", " ", text)
         return text.strip()[: self.MAX_CONTENT_LENGTH]
 
+    def extract_structured(self, url: str, extract_tables: bool = True, 
+                          extract_api_schemas: bool = True, 
+                          extract_config_examples: bool = True) -> Dict:
+        """Extract structured data like tables, API schemas, and config examples."""
+        valid, reason = self.validate_url(url)
+        if not valid:
+            return {"error": reason}
+        
+        html = self.fetch_with_timeout(url)
+        if not html:
+            return {"error": "Failed to fetch URL"}
+        
+        soup = BeautifulSoup(html, "html.parser")
+        result = {
+            "url": url,
+            "tables": [],
+            "api_schemas": [],
+            "config_examples": []
+        }
+        
+        if extract_tables:
+            result["tables"] = self._extract_tables(soup)
+        
+        if extract_api_schemas:
+            result["api_schemas"] = self._extract_api_schemas(soup)
+        
+        if extract_config_examples:
+            result["config_examples"] = self._extract_config_examples(soup)
+        
+        return result
+
+    def _extract_tables(self, soup: BeautifulSoup) -> List[Dict]:
+        """Extract tables from HTML."""
+        tables = []
+        for table in soup.find_all("table")[:10]:  # Limit to 10 tables
+            rows = []
+            for tr in table.find_all("tr")[:20]:  # Limit to 20 rows
+                cells = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
+                if cells:
+                    rows.append(cells)
+            if rows:
+                tables.append({
+                    "headers": rows[0] if rows else [],
+                    "rows": rows[1:] if len(rows) > 1 else []
+                })
+        return tables
+
+    def _extract_api_schemas(self, soup: BeautifulSoup) -> List[Dict]:
+        """Extract API schemas (REST endpoints, method signatures)."""
+        schemas = []
+        
+        # Look for code blocks that look like API documentation
+        for code in soup.find_all(["code", "pre"])[:15]:
+            text = code.get_text()
+            
+            # Detect common API patterns
+            if any(x in text for x in ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"]):
+                schemas.append({
+                    "type": "http_endpoint",
+                    "content": text[:500]
+                })
+            elif "{" in text and (":" in text or "}" in text):
+                schemas.append({
+                    "type": "json_schema",
+                    "content": text[:500]
+                })
+        
+        return schemas
+
+    def _extract_config_examples(self, soup: BeautifulSoup) -> List[Dict]:
+        """Extract configuration examples."""
+        configs = []
+        
+        # Look for configuration file examples
+        patterns = {
+            "yaml": [r"\.ya?ml", "YAML", "config:", "name:"],
+            "json": [r"\.json", "JSON", '"{', '"}'],
+            "ini": [r"\.ini", "[section]"],
+            "env": [r"\.env", "ENV_VAR="],
+            "docker": [r"Dockerfile", "FROM ", "RUN "],
+        }
+        
+        for code in soup.find_all(["code", "pre"])[:20]:
+            text = code.get_text()
+            
+            for config_type, keywords in patterns.items():
+                if any(keyword in text for keyword in keywords):
+                    configs.append({
+                        "type": config_type,
+                        "content": text[:500]
+                    })
+                    break
+        
+        return configs
+
 
 # ─── Factory ──────────────────────────────────────────────────────────────────
 

@@ -858,6 +858,140 @@ class SQLiteStore:
         """
         return self.search_code(query, language=language, limit=limit)
 
+    def search_with_filters(self, query: str, domain: str = None, language: str = None, 
+                           content_type: str = None, date_after: str = None, limit: int = 10) -> List[Dict]:
+        """Search with advanced filters."""
+        cursor = self.conn.cursor()
+        sql = "SELECT url, title, content FROM docs_fts WHERE docs_fts MATCH ?"
+        params = [query]
+        
+        if domain:
+            sql += " AND url LIKE ?"
+            params.append(f"%{domain}%")
+        
+        if content_type == "code":
+            sql = "SELECT url, title, snippet as content FROM code_fts WHERE code_fts MATCH ?"
+            params = [query]
+        
+        if date_after:
+            sql += " AND scraped_at >= ?"
+            params.append(date_after)
+        
+        sql += " LIMIT ?"
+        params.append(limit)
+        
+        rows = cursor.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_document(self, url: str) -> bool:
+        """Delete a document by URL."""
+        cursor = self.conn.cursor()
+        doc = cursor.execute("SELECT id FROM docs WHERE url = ?", (url,)).fetchone()
+        if not doc:
+            return False
+        
+        doc_id = doc["id"]
+        cursor.execute("DELETE FROM code_blocks WHERE doc_id = ?", (doc_id,))
+        cursor.execute("DELETE FROM doc_topics WHERE doc_id = ?", (doc_id,))
+        cursor.execute("DELETE FROM docs WHERE id = ?", (doc_id,))
+        self.conn.commit()
+        return True
+
+    def delete_old_documents(self, older_than_days: int) -> int:
+        """Delete documents older than N days."""
+        from datetime import datetime, timedelta
+        cutoff_date = (datetime.utcnow() - timedelta(days=older_than_days)).isoformat()
+        
+        cursor = self.conn.cursor()
+        doc_ids = cursor.execute("SELECT id FROM docs WHERE scraped_at < ?", (cutoff_date,)).fetchall()
+        
+        deleted_count = 0
+        for row in doc_ids:
+            doc_id = row["id"]
+            cursor.execute("DELETE FROM code_blocks WHERE doc_id = ?", (doc_id,))
+            cursor.execute("DELETE FROM doc_topics WHERE doc_id = ?", (doc_id,))
+            cursor.execute("DELETE FROM docs WHERE id = ?", (doc_id,))
+            deleted_count += 1
+        
+        self.conn.commit()
+        return deleted_count
+
+    def delete_domain_documents(self, domain: str) -> int:
+        """Delete all documents from a domain."""
+        cursor = self.conn.cursor()
+        doc_ids = cursor.execute("SELECT id FROM docs WHERE domain = ? OR url LIKE ?", 
+                                (domain, f"%{domain}%")).fetchall()
+        
+        deleted_count = 0
+        for row in doc_ids:
+            doc_id = row["id"]
+            cursor.execute("DELETE FROM code_blocks WHERE doc_id = ?", (doc_id,))
+            cursor.execute("DELETE FROM doc_topics WHERE doc_id = ?", (doc_id,))
+            cursor.execute("DELETE FROM docs WHERE id = ?", (doc_id,))
+            deleted_count += 1
+        
+        self.conn.commit()
+        return deleted_count
+
+    def get_detailed_stats(self) -> Dict:
+        """Get detailed index statistics."""
+        cursor = self.conn.cursor()
+        
+        total_docs = cursor.execute("SELECT COUNT(*) as count FROM docs").fetchone()["count"]
+        total_code = cursor.execute("SELECT COUNT(*) as count FROM code_blocks").fetchone()["count"]
+        
+        by_language = cursor.execute(
+            "SELECT language, COUNT(*) as count FROM code_blocks WHERE language IS NOT NULL GROUP BY language"
+        ).fetchall()
+        
+        by_domain = cursor.execute(
+            "SELECT domain, COUNT(*) as count FROM docs WHERE domain IS NOT NULL GROUP BY domain"
+        ).fetchall()
+        
+        last_update = cursor.execute(
+            "SELECT MAX(scraped_at) as last FROM docs"
+        ).fetchone()["last"]
+        
+        avg_size = cursor.execute(
+            "SELECT AVG(LENGTH(content)) as avg FROM docs"
+        ).fetchone()["avg"] or 0
+        
+        import os
+        try:
+            index_size = os.path.getsize(self.db_path) / 1024 / 1024
+        except:
+            index_size = 0
+        
+        return {
+            "total_documents": total_docs,
+            "total_code_blocks": total_code,
+            "by_language": {row["language"]: row["count"] for row in by_language},
+            "by_domain": {row["domain"]: row["count"] for row in by_domain},
+            "avg_doc_size_bytes": int(avg_size),
+            "index_size_mb": round(index_size, 2),
+            "last_updated": last_update
+        }
+
+    def get_all_document_urls(self, limit: int = 100) -> List[str]:
+        """Get all stored document URLs."""
+        cursor = self.conn.cursor()
+        rows = cursor.execute("SELECT url FROM docs LIMIT ?", (limit,)).fetchall()
+        return [row["url"] for row in rows]
+
+    def export_as_json(self) -> Dict:
+        """Export index as JSON."""
+        cursor = self.conn.cursor()
+        
+        docs = cursor.execute("SELECT url, title, content FROM docs LIMIT 50").fetchall()
+        code_blocks = cursor.execute("SELECT snippet, language FROM code_blocks LIMIT 50").fetchall()
+        
+        return {
+            "doc_count": len(docs),
+            "code_block_count": len(code_blocks),
+            "docs": [dict(row) for row in docs],
+            "code_blocks": [dict(row) for row in code_blocks]
+        }
+
     def close(self):
         """Close database connection."""
         if self.conn:

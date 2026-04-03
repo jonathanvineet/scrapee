@@ -307,6 +307,170 @@ class MCPServer:
                             "required": ["url"],
                         },
                     },
+                    {
+                        "name": "batch_scrape_urls",
+                        "description": (
+                            "Scrape and index multiple URLs in parallel. Use this to rapidly ingest "
+                            "multiple documentation sources at once. Much faster than scrape_url called multiple times."
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "urls": {"type": "array", "items": {"type": "string"}, "description": "Array of URLs to scrape"},
+                                "max_concurrent": {"type": "integer", "default": 3, "description": "Max parallel scrapes"},
+                                "max_depth": {"type": "integer", "default": 0},
+                            },
+                            "required": ["urls"],
+                        },
+                    },
+                    {
+                        "name": "search_with_filters",
+                        "description": (
+                            "Search indexed documentation with advanced filtering by domain, language, "
+                            "content type, and date range. Returns higher-quality results than basic search."
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string"},
+                                "domain": {"type": "string", "description": "Filter by domain (e.g. 'github.com')"},
+                                "language": {"type": "string", "description": "Filter by code language"},
+                                "content_type": {"type": "string", "enum": ["code", "text", "heading"], "description": "Filter by content type"},
+                                "date_after": {"type": "string", "description": "ISO 8601 date (YYYY-MM-DD)"},
+                                "limit": {"type": "integer", "default": 10},
+                            },
+                            "required": ["query"],
+                        },
+                    },
+                    {
+                        "name": "extract_structured_data",
+                        "description": (
+                            "Parse a URL and extract structured data like tables, API schemas, and config examples. "
+                            "Use when you need structured formats from documentation."
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "url": {"type": "string"},
+                                "extract_tables": {"type": "boolean", "default": True},
+                                "extract_api_schemas": {"type": "boolean", "default": True},
+                                "extract_config_examples": {"type": "boolean", "default": True},
+                            },
+                            "required": ["url"],
+                        },
+                    },
+                    {
+                        "name": "analyze_code_dependencies",
+                        "description": (
+                            "Analyze code snippets to extract imports, dependencies, and function signatures. "
+                            "Use to understand code requirements and structure."
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "code_snippets": {"type": "array", "items": {"type": "string"}},
+                                "language": {"type": "string"},
+                                "extract_imports": {"type": "boolean", "default": True},
+                                "extract_types": {"type": "boolean", "default": True},
+                            },
+                            "required": ["code_snippets", "language"],
+                        },
+                    },
+                    {
+                        "name": "delete_document",
+                        "description": (
+                            "Delete a single document by URL from the index. Use when a document is no longer relevant."
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "url": {"type": "string"},
+                            },
+                            "required": ["url"],
+                        },
+                    },
+                    {
+                        "name": "prune_docs",
+                        "description": (
+                            "Remove stale documentation older than N days, or all docs from a specific domain. "
+                            "Use to maintain index freshness and manage storage."
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "older_than_days": {"type": "integer", "description": "Delete docs scraped > N days ago"},
+                                "domain": {"type": "string", "description": "Delete all docs from this domain (e.g. 'old-api.example.com')"},
+                            },
+                        },
+                    },
+                    {
+                        "name": "get_index_stats",
+                        "description": (
+                            "Get detailed analytics about the search index including document count, "
+                            "code block count by language, top domains, and index size."
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                        },
+                    },
+                    {
+                        "name": "search_and_summarize",
+                        "description": (
+                            "Search documentation and automatically generate a brief summary of results. "
+                            "Use for quick answers without reading full documentation."
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string"},
+                                "summary_length": {"type": "string", "enum": ["short", "medium", "long"], "default": "medium"},
+                                "include_code_examples": {"type": "boolean", "default": True},
+                                "limit": {"type": "integer", "default": 5},
+                            },
+                            "required": ["query"],
+                        },
+                    },
+                    {
+                        "name": "compare_documents",
+                        "description": (
+                            "Find differences between two documents (e.g. old vs new API docs). "
+                            "Returns added, removed, and changed sections."
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "url1": {"type": "string"},
+                                "url2": {"type": "string"},
+                            },
+                            "required": ["url1", "url2"],
+                        },
+                    },
+                    {
+                        "name": "export_index",
+                        "description": (
+                            "Export the entire search index as a backup. Returns metadata about the export."
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "format": {"type": "string", "enum": ["json", "sqlite"], "default": "json"},
+                            },
+                        },
+                    },
+                    {
+                        "name": "validate_urls",
+                        "description": (
+                            "Batch check if stored document URLs are still live and accessible. "
+                            "Use to identify broken or redirected documentation links."
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "limit": {"type": "integer", "default": 20, "description": "Check up to N URLs"},
+                            },
+                        },
+                    },
                 ]
             },
         )
@@ -327,6 +491,17 @@ class MCPServer:
             "search_code": self._tool_search_code,
             "list_docs": self._tool_list_docs,
             "get_doc": self._tool_get_doc,
+            "batch_scrape_urls": self._tool_batch_scrape_urls,
+            "search_with_filters": self._tool_search_with_filters,
+            "extract_structured_data": self._tool_extract_structured_data,
+            "analyze_code_dependencies": self._tool_analyze_code_dependencies,
+            "delete_document": self._tool_delete_document,
+            "prune_docs": self._tool_prune_docs,
+            "get_index_stats": self._tool_get_index_stats,
+            "search_and_summarize": self._tool_search_and_summarize,
+            "compare_documents": self._tool_compare_documents,
+            "export_index": self._tool_export_index,
+            "validate_urls": self._tool_validate_urls,
         }
 
         handler = tools.get(tool_name)
@@ -523,6 +698,375 @@ class MCPServer:
     # ------------------------------------------------------------------ #
     # Tool implementations                                                  #
     # ------------------------------------------------------------------ #
+
+    def _tool_batch_scrape_urls(self, args: Dict) -> Dict:
+        """Scrape multiple URLs in parallel."""
+        import concurrent.futures
+        
+        urls = args.get("urls", [])
+        if not isinstance(urls, list) or not urls:
+            return {"error": "urls must be a non-empty array"}
+        
+        max_concurrent = self._coerce_int(args.get("max_concurrent", 3), 3, 1, 10)
+        max_depth = self._coerce_int(args.get("max_depth", 0), 0, 0, 2)
+        results = []
+        
+        def scrape_one(url: str):
+            try:
+                valid, reason = self._validate_scrape_url(url)
+                if not valid:
+                    return {"url": url, "success": False, "error": reason}
+                
+                result = self._run_with_timeout(
+                    lambda: self.scraper.scrape(url, max_depth=max_depth),
+                    SCRAPE_TIMEOUT_SECONDS
+                )
+                
+                self.store.add_document(
+                    url=result.get("url", url),
+                    title=result.get("title"),
+                    content=result.get("content"),
+                    code_blocks=result.get("code_blocks", []),
+                    topics=result.get("topics", []),
+                )
+                self.store._push_to_redis()
+                return {"url": url, "success": True, "title": result.get("title")}
+            except Exception as e:
+                return {"url": url, "success": False, "error": str(e)}
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent) as executor:
+            results = list(executor.map(scrape_one, urls))
+        
+        return {
+            "total": len(urls),
+            "successful": sum(1 for r in results if r.get("success")),
+            "results": results
+        }
+
+    def _tool_search_with_filters(self, args: Dict) -> Dict:
+        """Search with advanced filtering."""
+        query = str(args.get("query", "")).strip()
+        if not query:
+            return {"error": "query is required"}
+        
+        domain = str(args.get("domain", "")).strip() or None
+        language = str(args.get("language", "")).strip() or None
+        content_type = str(args.get("content_type", "")).strip() or None
+        date_after = str(args.get("date_after", "")).strip() or None
+        limit = self._coerce_int(args.get("limit", 10), 10, 1, 100)
+        
+        results = self.store.search_with_filters(
+            query=query,
+            domain=domain,
+            language=language,
+            content_type=content_type,
+            date_after=date_after,
+            limit=limit
+        )
+        return {"results": results, "count": len(results)}
+
+    def _tool_extract_structured_data(self, args: Dict) -> Dict:
+        """Extract tables, schemas, and config examples from a URL."""
+        url = str(args.get("url", "")).strip()
+        if not url:
+            return {"error": "url is required"}
+        
+        valid, reason = self._validate_scrape_url(url)
+        if not valid:
+            return {"error": f"Invalid URL: {reason}"}
+        
+        extract_tables = bool(args.get("extract_tables", True))
+        extract_api_schemas = bool(args.get("extract_api_schemas", True))
+        extract_config_examples = bool(args.get("extract_config_examples", True))
+        
+        try:
+            result = self._run_with_timeout(
+                lambda: self.scraper.extract_structured(
+                    url,
+                    extract_tables=extract_tables,
+                    extract_api_schemas=extract_api_schemas,
+                    extract_config_examples=extract_config_examples
+                ),
+                SCRAPE_TIMEOUT_SECONDS
+            )
+            return result
+        except Exception as e:
+            return {"error": str(e)}
+
+    def _tool_analyze_code_dependencies(self, args: Dict) -> Dict:
+        """Analyze code snippets for imports and dependencies."""
+        code_snippets = args.get("code_snippets", [])
+        language = str(args.get("language", "")).strip().lower()
+        extract_imports = bool(args.get("extract_imports", True))
+        extract_types = bool(args.get("extract_types", True))
+        
+        if not isinstance(code_snippets, list) or not code_snippets:
+            return {"error": "code_snippets must be a non-empty array"}
+        
+        if not language:
+            return {"error": "language is required"}
+        
+        results = {
+            "language": language,
+            "snippets_analyzed": len(code_snippets),
+            "imports": [],
+            "types": [],
+            "functions": []
+        }
+        
+        for snippet in code_snippets:
+            if extract_imports:
+                imports = self._extract_imports(snippet, language)
+                results["imports"].extend(imports)
+            
+            if extract_types:
+                types = self._extract_types(snippet, language)
+                results["types"].extend(types)
+            
+            functions = self._extract_functions(snippet, language)
+            results["functions"].extend(functions)
+        
+        return results
+
+    def _tool_delete_document(self, args: Dict) -> Dict:
+        """Delete a single document."""
+        url = str(args.get("url", "")).strip()
+        if not url:
+            return {"error": "url is required"}
+        
+        deleted = self.store.delete_document(url)
+        if deleted:
+            self.store._push_to_redis()
+            return {"success": True, "deleted": True, "url": url}
+        return {"success": False, "deleted": False, "error": "Document not found"}
+
+    def _tool_prune_docs(self, args: Dict) -> Dict:
+        """Prune old documents or by domain."""
+        older_than_days = args.get("older_than_days")
+        domain = str(args.get("domain", "")).strip() or None
+        
+        if older_than_days is not None:
+            count = self.store.delete_old_documents(int(older_than_days))
+            self.store._push_to_redis()
+            return {"success": True, "deleted_count": count, "reason": f"older than {older_than_days} days"}
+        
+        if domain:
+            count = self.store.delete_domain_documents(domain)
+            self.store._push_to_redis()
+            return {"success": True, "deleted_count": count, "reason": f"domain: {domain}"}
+        
+        return {"error": "Either older_than_days or domain is required"}
+
+    def _tool_get_index_stats(self, args: Dict) -> Dict:
+        """Get detailed index statistics."""
+        return self.store.get_detailed_stats()
+
+    def _tool_search_and_summarize(self, args: Dict) -> Dict:
+        """Search and generate a summary."""
+        query = str(args.get("query", "")).strip()
+        if not query:
+            return {"error": "query is required"}
+        
+        summary_length = str(args.get("summary_length", "medium")).strip().lower()
+        include_code = bool(args.get("include_code_examples", True))
+        limit = self._coerce_int(args.get("limit", 5), 5, 1, 20)
+        
+        results = self.store.search_and_get(query, limit=limit, snippet_length=500)
+        
+        summary = self._generate_summary(results, summary_length)
+        
+        data = {
+            "query": query,
+            "summary": summary,
+            "result_count": len(results),
+            "results": results[:3]
+        }
+        
+        if include_code:
+            code_results = self.store.search_code(query, limit=2)
+            data["code_examples"] = code_results
+        
+        return data
+
+    def _tool_compare_documents(self, args: Dict) -> Dict:
+        """Compare two documents."""
+        url1 = str(args.get("url1", "")).strip()
+        url2 = str(args.get("url2", "")).strip()
+        
+        if not url1 or not url2:
+            return {"error": "url1 and url2 are required"}
+        
+        doc1 = self.store.get_document(url1)
+        doc2 = self.store.get_document(url2)
+        
+        if not doc1:
+            return {"error": f"Document not found: {url1}"}
+        if not doc2:
+            return {"error": f"Document not found: {url2}"}
+        
+        diff = self._compute_diff(doc1.get("content", ""), doc2.get("content", ""))
+        return {
+            "url1": url1,
+            "url2": url2,
+            "similarity": diff.get("similarity", 0),
+            "added_lines": diff.get("added", []),
+            "removed_lines": diff.get("removed", []),
+            "changed_sections": diff.get("changed", [])
+        }
+
+    def _tool_export_index(self, args: Dict) -> Dict:
+        """Export the index."""
+        format_type = str(args.get("format", "json")).strip().lower()
+        
+        if format_type == "sqlite":
+            import os
+            try:
+                size = os.path.getsize(self.store.db_path)
+                return {
+                    "format": "sqlite",
+                    "path": self.store.db_path,
+                    "size_bytes": size,
+                    "size_mb": round(size / 1024 / 1024, 2)
+                }
+            except Exception as e:
+                return {"error": str(e)}
+        
+        # JSON export
+        try:
+            export_data = self.store.export_as_json()
+            return {
+                "format": "json",
+                "doc_count": export_data.get("doc_count", 0),
+                "code_block_count": export_data.get("code_block_count", 0),
+                "size_mb": len(json.dumps(export_data)) / 1024 / 1024,
+                "preview": {"docs": export_data.get("docs", [])[:2]}
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    def _tool_validate_urls(self, args: Dict) -> Dict:
+        """Validate stored document URLs."""
+        import requests
+        
+        limit = self._coerce_int(args.get("limit", 20), 20, 1, 100)
+        urls = self.store.get_all_document_urls(limit=limit)
+        
+        results = []
+        for url in urls:
+            try:
+                resp = requests.head(url, timeout=5, allow_redirects=True)
+                results.append({
+                    "url": url,
+                    "status": resp.status_code,
+                    "alive": 200 <= resp.status_code < 400,
+                    "redirect": resp.url if resp.url != url else None
+                })
+            except Exception as e:
+                results.append({
+                    "url": url,
+                    "status": None,
+                    "alive": False,
+                    "error": str(e)
+                })
+        
+        return {
+            "checked": len(results),
+            "alive": sum(1 for r in results if r.get("alive")),
+            "dead": sum(1 for r in results if not r.get("alive")),
+            "results": results
+        }
+
+    # Helper methods for new tools
+    def _extract_imports(self, code: str, language: str) -> List[str]:
+        """Extract imports from code."""
+        imports = []
+        lines = code.split("\n")
+        
+        if language == "python":
+            for line in lines:
+                if line.strip().startswith(("import ", "from ")):
+                    imports.append(line.strip())
+        elif language in ("javascript", "typescript"):
+            for line in lines:
+                if any(x in line for x in ["import ", "require("]):
+                    imports.append(line.strip())
+        elif language == "java":
+            for line in lines:
+                if line.strip().startswith("import "):
+                    imports.append(line.strip())
+        
+        return list(set(imports))
+
+    def _extract_types(self, code: str, language: str) -> List[str]:
+        """Extract type definitions from code."""
+        types = []
+        
+        if language == "typescript":
+            import re
+            type_pattern = r"(?:type|interface)\s+(\w+)"
+            types = re.findall(type_pattern, code)
+        elif language == "python":
+            import re
+            class_pattern = r"class\s+(\w+)"
+            types = re.findall(class_pattern, code)
+        
+        return list(set(types))
+
+    def _extract_functions(self, code: str, language: str) -> List[str]:
+        """Extract function definitions from code."""
+        import re
+        functions = []
+        
+        patterns = {
+            "python": r"def\s+(\w+)\s*\(",
+            "javascript": r"(?:function|const|let)\s+(\w+)\s*(?:\(|=)",
+            "typescript": r"(?:function|const|let)\s+(\w+)\s*(?:\(|:|=)",
+            "java": r"(?:public|private|protected)?\s*(?:static)?\s*\w+\s+(\w+)\s*\(",
+            "rust": r"fn\s+(\w+)\s*\(",
+            "go": r"func\s+(?:\([^)]*\)\s+)?(\w+)\s*\(",
+        }
+        
+        pattern = patterns.get(language)
+        if pattern:
+            functions = re.findall(pattern, code)
+        
+        return list(set(functions))
+
+    def _generate_summary(self, results: List[Dict], length: str = "medium") -> str:
+        """Generate a summary from search results."""
+        if not results:
+            return "No results found."
+        
+        max_chars = {"short": 200, "medium": 500, "long": 1000}.get(length, 500)
+        
+        summaries = []
+        for result in results:
+            snippet = result.get("snippet", "")[:max_chars]
+            summaries.append(snippet)
+        
+        summary = " ".join(summaries)[:max_chars]
+        return summary + ("..." if len(summary) == max_chars else "")
+
+    def _compute_diff(self, content1: str, content2: str) -> Dict:
+        """Compute difference between two documents."""
+        import difflib
+        
+        lines1 = content1.split("\n")
+        lines2 = content2.split("\n")
+        
+        diff = list(difflib.unified_diff(lines1, lines2, lineterm=""))
+        
+        added = [line[1:] for line in diff if line.startswith("+") and not line.startswith("+++")]
+        removed = [line[1:] for line in diff if line.startswith("-") and not line.startswith("---")]
+        
+        similarity = difflib.SequenceMatcher(None, content1, content2).ratio()
+        
+        return {
+            "similarity": round(similarity * 100, 2),
+            "added": added[:10],
+            "removed": removed[:10],
+            "changed": list(zip(removed[:10], added[:10]))
+        }
 
     def _tool_search_and_get(self, args: Dict) -> Dict:
         """Search indexed docs; auto-ingest if index is empty."""
