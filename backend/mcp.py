@@ -24,7 +24,7 @@ from utils.normalize import normalize_url
 
 
 PROTOCOL_VERSION = "2024-11-05"
-SERVER_NAME = "scrapee"
+SERVER_NAME = "🦇 Scrapee"
 SERVER_VERSION = "1.0.0"
 SCRAPE_TIMEOUT_SECONDS = 8
 
@@ -202,6 +202,7 @@ class MCPServer:
                 },
                 "serverInfo": {
                     "name": self.name,
+                    "title": self.name,
                     "version": self.version,
                 },
             },

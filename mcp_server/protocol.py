@@ -12,6 +12,10 @@ from mcp_server.logging_utils import setup_logging
 logger = setup_logging(__name__)
 
 
+SERVER_NAME = "🦇 Scrapee"
+SERVER_VERSION = "2.0.0"
+
+
 class MCPProtocol:
 
     def __init__(self, tools, resources):
@@ -96,8 +100,9 @@ class MCPProtocol:
                 "prompts":   {"listChanged": False}
             },
             "serverInfo": {
-                "name":    "scrapee",
-                "version": "2.0.0"
+                "name": SERVER_NAME,
+                "title": SERVER_NAME,
+                "version": SERVER_VERSION
             },
             # ✅ This is what makes the agent use tools without being asked
             "instructions": (

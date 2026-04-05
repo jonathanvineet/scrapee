@@ -1,10 +1,12 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import Image from 'next/image';
 import ScraperForm from '@/components/ScraperForm';
 import ResultsDisplay from '@/components/ResultsDisplay';
 import History from '@/components/History';
 import '@/styles/globals.css';
+import batmanLogo from '../batman_logo.png';
 
 export default function Home() {
   const [results, setResults] = useState(null);
@@ -48,7 +50,15 @@ export default function Home() {
   return (
     <div className="container">
       <header>
-        <h1>root@scrapee:~#</h1>
+        <div className="brand">
+          <Image
+            src={batmanLogo}
+            alt="Scrapee bat logo"
+            className="brand-logo"
+            priority
+          />
+          <h1>root@scrapee:~#</h1>
+        </div>
         <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--fg-muted)' }}>
           <p>sys_ver: 2.4.0_beta</p>
           <p>SYSTIME: {timestamp}</p>
