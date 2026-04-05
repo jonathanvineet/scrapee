@@ -723,10 +723,14 @@ class MCPServer:
                     SCRAPE_TIMEOUT_SECONDS
                 )
                 
-                self.store.add_document(
+                # Save document with metadata
+                metadata = {
+                    "title": result.get("title", ""),
+                }
+                self.store.save_doc(
                     url=result.get("url", url),
-                    title=result.get("title"),
-                    content=result.get("content"),
+                    content=result.get("content", ""),
+                    metadata=metadata,
                     code_blocks=result.get("code_blocks", []),
                     topics=result.get("topics", []),
                 )
