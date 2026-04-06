@@ -124,6 +124,9 @@ class MCPServer:
         self.name = SERVER_NAME
         self.version = SERVER_VERSION
         
+        # Strict mode: Only return content actually in the index, never hallucinate
+        self.strict_mode = True
+        
         # Bootstrap essential documentation on startup (in a background thread)
         threading.Thread(target=self._bootstrap_docs, daemon=True).start()
 
@@ -894,7 +897,13 @@ class MCPServer:
         return self.store.get_detailed_stats()
 
     def _tool_search_and_summarize(self, args: Dict) -> Dict:
-        """Search and generate a summary."""
+        """Search and generate a summary from ACTUAL indexed content only.
+        
+        STRICT MODE ENFORCEMENT:
+        - Only returns snippets actually extracted from indexed documents
+        - Includes source URLs so user can verify content
+        - Refuses to generate or hallucinate code/examples
+        """
         query = str(args.get("query", "")).strip()
         if not query:
             return {"error": "query is required"}
@@ -905,18 +914,48 @@ class MCPServer:
         
         results = self.store.search_and_get(query, limit=limit, snippet_length=500)
         
+        # STRICT MODE: Validate results have actual content before summarizing
+        if not results:
+            return {
+                "query": query,
+                "summary": "No indexed documentation found for this query.",
+                "result_count": 0,
+                "results": [],
+                "note": "Please scrape documentation sources first using scrape_url or batch_scrape_urls."
+            }
+        
         summary = self._generate_summary(results, summary_length)
         
         data = {
             "query": query,
             "summary": summary,
             "result_count": len(results),
-            "results": results[:3]
+            "results": [
+                {
+                    "url": r.get("url"),
+                    "title": r.get("title"),
+                    "snippet": r.get("snippet")
+                }
+                for r in results[:3]
+            ],
+            "strict_mode": True,
+            "warning": "This summary contains ONLY content from indexed documentation. No hallucinated content."
         }
         
         if include_code:
             code_results = self.store.search_code(query, limit=2)
-            data["code_examples"] = code_results
+            if code_results:
+                data["code_examples"] = [
+                    {
+                        "url": c.get("url"),
+                        "language": c.get("language"),
+                        "snippet": c.get("snippet")
+                    }
+                    for c in code_results
+                ]
+            else:
+                data["code_examples"] = []
+                data["code_note"] = "No code blocks found. Try search_code with different keywords."
         
         return data
 
@@ -1065,7 +1104,11 @@ class MCPServer:
         return list(set(functions))
 
     def _generate_summary(self, results: List[Dict], length: str = "medium") -> str:
-        """Generate a summary from search results."""
+        """Generate a summary from search results.
+        
+        STRICT MODE: Only concatenates actual document snippets.
+        Never generates or hallucinate content.
+        """
         if not results:
             return "No results found."
         
@@ -1073,11 +1116,25 @@ class MCPServer:
         
         summaries = []
         for result in results:
-            snippet = result.get("snippet", "")[:max_chars]
-            summaries.append(snippet)
+            snippet = result.get("snippet", "")
+            
+            # STRICT MODE: Only include actual snippets from indexed documents
+            if self.strict_mode and not snippet:
+                continue
+            
+            snippet = snippet[:max_chars]
+            if snippet.strip():  # Only add non-empty snippets
+                summaries.append(snippet)
+        
+        if not summaries:
+            return "No relevant content found in indexed documentation."
         
         summary = " ".join(summaries)[:max_chars]
-        return summary + ("..." if len(summary) == max_chars else "")
+        
+        # Append source attribution
+        source_info = f"\n\n**Note**: All content is from indexed documentation. To see code examples, use search_code tool."
+        
+        return summary + ("..." if len(summary) == max_chars else "") + source_info
 
     def _compute_diff(self, content1: str, content2: str) -> Dict:
         """Compute difference between two documents."""
@@ -1101,7 +1158,10 @@ class MCPServer:
         }
 
     def _tool_search_and_get(self, args: Dict) -> Dict:
-        """Search indexed docs; auto-ingest if index is empty."""
+        """Search indexed docs; auto-ingest if index is empty.
+        
+        STRICT MODE: Only returns actual document content. Never hallucinate.
+        """
         query = str(args.get("query", "")).strip()
         limit = self._coerce_int(args.get("limit", args.get("k", 5)), default=5, minimum=1, maximum=10)
         snippet_length = self._coerce_int(args.get("snippet_length", 400), default=400, minimum=100, maximum=2000)
@@ -1130,7 +1190,24 @@ class MCPServer:
                     print(f"[MCP] auto-ingest failed: {exc}")
         # ───────────────────────────────────────────────────────────────
 
-        payload = {"query": query, "total": len(results), "results": results}
+        # STRICT MODE: Include source attribution for all results
+        verified_results = [
+            {
+                "url": r.get("url"),
+                "title": r.get("title"),
+                "snippet": r.get("snippet"),
+                "domain": r.get("domain"),
+            }
+            for r in results
+        ]
+
+        payload = {
+            "query": query,
+            "total": len(verified_results),
+            "results": verified_results,
+            "strict_mode": True,
+            "warning": "All results are from indexed documentation only."
+        }
         if results:
             self.cache.set(cache_key, payload)
         return payload
@@ -1227,7 +1304,11 @@ class MCPServer:
         return payload
 
     def _tool_search_code(self, args: Dict) -> Dict:
-        """Search indexed code blocks."""
+        """Search indexed code blocks only - strict mode.
+        
+        STRICT MODE: Only returns code snippets actually extracted from indexed documents.
+        Includes full source information so code origin can be verified.
+        """
         query = str(args.get("query", "")).strip()
         language = str(args.get("language", "")).strip() or None
         limit = self._coerce_int(args.get("limit", 5), default=5, minimum=1, maximum=20)
@@ -1240,7 +1321,27 @@ class MCPServer:
             return cached
 
         results = self.store.search_code(query, language=language, limit=limit)
-        payload = {"query": query, "language": language, "total": len(results), "results": results}
+        
+        # STRICT MODE: Include full source information
+        verified_code = [
+            {
+                "url": c.get("url"),
+                "language": c.get("language"),
+                "snippet": c.get("snippet"),
+                "context": c.get("context"),  # e.g., "function definition", "class method"
+            }
+            for c in results
+        ]
+        
+        payload = {
+            "query": query,
+            "language": language,
+            "total": len(verified_code),
+            "results": verified_code,
+            "strict_mode": True,
+            "warning": "All code snippets are extracted directly from indexed documentation.",
+            "tip": "Verify each snippet by visiting the source URL."
+        }
         self.cache.set(cache_key, payload)
         return payload
 
@@ -1252,14 +1353,49 @@ class MCPServer:
         return {"total": stats.get("total_docs", 0), "urls": docs, "stats": stats}
 
     def _tool_get_doc(self, args: Dict) -> Dict:
-        """Return full document contents by URL."""
-        url = normalize_url(str(args.get("url", "")).strip())
-        if not url:
+        """Return full document contents by URL.
+        
+        STRICT MODE: Tries multiple URL variations (with/without trailing slash, etc.)
+        before reporting not found. Suggests scraping if document doesn't exist.
+        """
+        raw_url = str(args.get("url", "")).strip()
+        if not raw_url:
             return {"error": "url is required"}
+        
+        url = normalize_url(raw_url)
+        
+        # Try exact match
         doc = self.store.get_doc(url)
-        if not doc:
-            return {"error": f"document not found: {url}"}
-        return doc
+        if doc:
+            return doc
+        
+        # Try URL variations (with/without trailing slash)
+        url_variations = [
+            url,
+            url.rstrip("/"),
+            url + "/" if not url.endswith("/") else url,
+            url.replace("https://", "http://"),
+            url.replace("http://", "https://"),
+        ]
+        
+        for variant in url_variations:
+            if variant != url:  # Skip if we already tried this
+                doc = self.store.get_doc(variant)
+                if doc:
+                    return doc
+        
+        # Not found - provide helpful error with suggestions
+        return {
+            "error": f"document not found: {url}",
+            "suggestion": "This document is not in the index yet.",
+            "next_steps": [
+                "1. Use scrape_url to fetch and index this URL",
+                "2. Or use batch_scrape_urls if you have multiple URLs",
+                "3. Then retry get_doc"
+            ],
+            "example": f"scrape_url with url='{url}'",
+            "strict_mode": True
+        }
 
     # ------------------------------------------------------------------ #
     # Auto-ingestion helpers                                                #
