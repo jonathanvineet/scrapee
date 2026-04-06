@@ -127,6 +127,9 @@ class MCPServer:
         # Strict mode: Only return content actually in the index, never hallucinate
         self.strict_mode = True
         
+        # Auto-load frontend payloads on startup (works on local + Vercel)
+        threading.Thread(target=self._auto_load_payloads, daemon=True).start()
+        
         # Bootstrap essential documentation on startup (in a background thread)
         threading.Thread(target=self._bootstrap_docs, daemon=True).start()
 
@@ -147,6 +150,104 @@ class MCPServer:
                     self._tool_scrape_url({"url": url, "mode": "smart", "max_depth": 1})
             except Exception as e:
                 print(f"[MCP] Failed to bootstrap {url}: {e}")
+
+    def _auto_load_payloads(self):
+        """Auto-load frontend payloads from known locations.
+        
+        Supports:
+        - Local: ./payload-*.json (current directory)
+        - Vercel: /tmp/payload-*.json
+        
+        This runs on startup so user doesn't need to manually import.
+        """
+        import os
+        import glob
+        
+        # Check multiple payload locations
+        payload_locations = [
+            "./payload-*.json",  # Current directory (local)
+            "/tmp/payload-*.json",  # Vercel temp directory
+            "payload-*.json",  # Relative to cwd
+        ]
+        
+        payload_files = []
+        for pattern in payload_locations:
+            try:
+                found = glob.glob(pattern)
+                payload_files.extend(found)
+            except Exception:
+                pass
+        
+        # Remove duplicates
+        payload_files = list(set(payload_files))
+        
+        if not payload_files:
+            print("[MCP] No frontend payloads found. User can still ask questions about scraped content.")
+            return
+        
+        print(f"[MCP] Found {len(payload_files)} frontend payload(s). Auto-loading...")
+        
+        for file_path in payload_files:
+            if not os.path.exists(file_path):
+                continue
+            
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    payload = json.load(f)
+                
+                result = self._import_payload_data(payload)
+                if result.get("imported", 0) > 0:
+                    print(f"[MCP] ✓ Auto-loaded {result['imported']} docs from {file_path}")
+            except Exception as e:
+                print(f"[MCP] Failed to auto-load {file_path}: {e}")
+
+    def _import_payload_data(self, payload: Dict) -> Dict:
+        """Helper to import payload without file I/O. Used by _auto_load_payloads."""
+        documents = payload.get("documents", []) if isinstance(payload, dict) else []
+        
+        if not documents:
+            return {"imported": 0, "skipped": 0}
+        
+        imported = 0
+        skipped = 0
+        
+        for doc in documents:
+            try:
+                url = doc.get("url", "").strip()
+                content = doc.get("content", "").strip()
+                
+                if not url or not content:
+                    skipped += 1
+                    continue
+                
+                # Check if already imported
+                if self.store.get_doc(url):
+                    skipped += 1
+                    continue
+                
+                # Import to backend
+                metadata = {
+                    "title": doc.get("title", ""),
+                    "source": "frontend_payload",
+                    "imported_at": str(time.time()),
+                }
+                
+                self.store.save_doc(
+                    url=url,
+                    content=content,
+                    metadata=metadata,
+                    code_blocks=doc.get("code_blocks", []),
+                    topics=doc.get("topics", []),
+                )
+                imported += 1
+            except Exception:
+                pass
+        
+        if imported > 0:
+            self.store._push_to_redis()
+            self.cache.clear()
+        
+        return {"imported": imported, "skipped": skipped}
 
     # ------------------------------------------------------------------ #
     # Public entry point                                                    #
