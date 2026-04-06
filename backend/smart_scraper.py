@@ -189,6 +189,48 @@ class SmartScraper:
             "metadata": metadata,
         }
 
+    def scrape(self, url: str, max_depth: int = 0, timeout: int = FETCH_TIMEOUT_SECONDS) -> Dict:
+        """
+        Scrape a single URL: fetch HTML, parse, and extract structured content.
+        
+        Args:
+            url: The URL to scrape
+            max_depth: Not used (kept for compatibility with crawler interface)
+            timeout: Seconds to wait for the request
+        
+        Returns:
+            Dict with keys: url, title, content, code_blocks, topics, or error key on failure
+        """
+        # Validate URL
+        valid, error_msg = self.validate_url(url)
+        if not valid:
+            return {"url": url, "error": error_msg}
+        
+        # Fetch HTML
+        html = self.fetch_with_timeout(url, timeout=timeout)
+        if html is None:
+            return {"url": url, "error": "Failed to fetch URL (HTTP error or connection refused)"}
+        if html == "":
+            return {"url": url, "error": "Request timeout - no content received"}
+        
+        # Parse and extract
+        parsed = self.parse_html(html, url)
+        
+        # Validate content
+        content = parsed.get("content", "").strip()
+        if not content or len(content) < 20:
+            return {"url": url, "error": "Page has insufficient content (< 20 characters)"}
+        
+        # Build response
+        metadata = parsed.get("metadata", {})
+        return {
+            "url": url,
+            "title": metadata.get("title", ""),
+            "content": content,
+            "code_blocks": parsed.get("code_blocks", []),
+            "topics": parsed.get("topics", []),
+        }
+
     # ------------------------------------------------------------------ #
     # Private helpers                                                        #
     # ------------------------------------------------------------------ #

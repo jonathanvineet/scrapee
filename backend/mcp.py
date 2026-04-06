@@ -701,7 +701,7 @@ class MCPServer:
     # ------------------------------------------------------------------ #
 
     def _tool_batch_scrape_urls(self, args: Dict) -> Dict:
-        """Scrape multiple URLs in parallel."""
+        """Scrape multiple URLs in parallel, or return cached docs if already indexed."""
         import concurrent.futures
         
         urls = args.get("urls", [])
@@ -718,10 +718,26 @@ class MCPServer:
                 if not valid:
                     return {"url": url, "success": False, "error": reason}
                 
+                # Check if already indexed to avoid duplicate scraping
+                cached_doc = self.store.get_doc(url)
+                if cached_doc:
+                    return {
+                        "url": url,
+                        "success": True,
+                        "title": cached_doc.get("title", ""),
+                        "cached": True,
+                        "note": "Document already indexed"
+                    }
+                
                 result = self._run_with_timeout(
                     lambda: self.scraper.scrape(url, max_depth=max_depth),
                     SCRAPE_TIMEOUT_SECONDS
                 )
+                
+                # Validate content before storing
+                content = result.get("content", "").strip()
+                if not content:
+                    return {"url": url, "success": False, "error": "No content extracted"}
                 
                 # Save document with metadata
                 metadata = {
@@ -729,22 +745,33 @@ class MCPServer:
                 }
                 self.store.save_doc(
                     url=result.get("url", url),
-                    content=result.get("content", ""),
+                    content=content,
                     metadata=metadata,
                     code_blocks=result.get("code_blocks", []),
                     topics=result.get("topics", []),
                 )
                 self.store._push_to_redis()
-                return {"url": url, "success": True, "title": result.get("title")}
+                return {
+                    "url": url,
+                    "success": True,
+                    "title": result.get("title", ""),
+                    "cached": False,
+                    "content_length": len(content)
+                }
             except Exception as e:
                 return {"url": url, "success": False, "error": str(e)}
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent) as executor:
             results = list(executor.map(scrape_one, urls))
         
+        cached_count = sum(1 for r in results if r.get("cached"))
+        fresh_count = sum(1 for r in results if r.get("success") and not r.get("cached"))
+        
         return {
             "total": len(urls),
             "successful": sum(1 for r in results if r.get("success")),
+            "cached": cached_count,
+            "fresh": fresh_count,
             "results": results
         }
 
@@ -901,8 +928,8 @@ class MCPServer:
         if not url1 or not url2:
             return {"error": "url1 and url2 are required"}
         
-        doc1 = self.store.get_document(url1)
-        doc2 = self.store.get_document(url2)
+        doc1 = self.store.get_doc(url1)
+        doc2 = self.store.get_doc(url2)
         
         if not doc1:
             return {"error": f"Document not found: {url1}"}
