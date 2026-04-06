@@ -475,6 +475,20 @@ class MCPServer:
                             },
                         },
                     },
+                    {
+                        "name": "import_payload",
+                        "description": (
+                            "Import frontend-scraped documents from payload JSON (direct or file). "
+                            "Works on both local and Vercel. Use this to sync data from frontend scraping to backend index."
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "payload": {"type": "object", "description": "Payload JSON object directly (best for Vercel/serverless)"},
+                                "file_path": {"type": "string", "description": "Path to payload JSON file (local or /tmp on Vercel)"},
+                            },
+                        },
+                    },
                 ]
             },
         )
@@ -506,6 +520,7 @@ class MCPServer:
             "compare_documents": self._tool_compare_documents,
             "export_index": self._tool_export_index,
             "validate_urls": self._tool_validate_urls,
+            "import_payload": self._tool_import_payload,
         }
 
         handler = tools.get(tool_name)
@@ -1047,6 +1062,144 @@ class MCPServer:
             "results": results
         }
 
+    def _tool_import_payload(self, args: Dict) -> Dict:
+        """Import frontend-scraped documents from payload JSON file or direct JSON.
+        
+        Supports both:
+        - Local: file_path to payload JSON
+        - Vercel: payload JSON object directly
+        
+        This syncs data from frontend scraping to the backend SQLite index.
+        Makes get_doc work with the documents already scraped in the frontend.
+        """
+        import os
+        from pathlib import Path
+        
+        payload = None
+        source = None
+        
+        # Method 1: Direct JSON payload (best for Vercel/serverless)
+        if "payload" in args and isinstance(args.get("payload"), dict):
+            payload = args.get("payload")
+            source = "direct_json"
+        
+        # Method 2: File path (local or Vercel /tmp)
+        elif "file_path" in args:
+            file_path = str(args.get("file_path", "")).strip()
+            if not file_path:
+                return {"error": "file_path is required if payload not provided"}
+            
+            # Support relative paths - resolve from project root or /tmp
+            if not file_path.startswith("/"):
+                # Try relative to current working directory first
+                cwd = os.getcwd()
+                candidate = os.path.join(cwd, file_path)
+                
+                if os.path.exists(candidate):
+                    file_path = candidate
+                else:
+                    # Try /tmp for Vercel
+                    tmp_candidate = os.path.join("/tmp", file_path)
+                    if os.path.exists(tmp_candidate):
+                        file_path = tmp_candidate
+                    else:
+                        # Try project root (for local dev)
+                        root = os.environ.get("PROJECT_ROOT", "/Users/jonathan/elco/scrapee")
+                        root_candidate = os.path.join(root, file_path)
+                        if os.path.exists(root_candidate):
+                            file_path = root_candidate
+            
+            file_path = os.path.abspath(file_path)
+            
+            if not os.path.exists(file_path):
+                return {
+                    "error": f"File not found: {file_path}",
+                    "suggestion": "Check the filename. For Vercel, make sure the file is in /tmp or specify full path.",
+                    "cwd": os.getcwd()
+                }
+            
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    payload = json.load(f)
+                source = f"file:{file_path}"
+            except json.JSONDecodeError as e:
+                return {"error": f"Invalid JSON: {str(e)}"}
+            except Exception as e:
+                return {"error": f"Failed to read file: {str(e)}"}
+        else:
+            return {
+                "error": "Either 'payload' (JSON object) or 'file_path' (string) is required",
+                "methods": {
+                    "method_1_direct": "Pass payload JSON directly (best for Vercel)",
+                    "method_2_file": "Pass file_path to payload JSON (local or /tmp)"
+                }
+            }
+        
+        # Parse payload structure (frontend format)
+        documents = payload.get("documents", []) if isinstance(payload, dict) else []
+        
+        if not documents:
+            return {
+                "error": "No documents found in payload",
+                "suggestion": "Payload should contain 'documents' array with {url, content, title, ...}"
+            }
+        
+        imported = 0
+        skipped = 0
+        errors = []
+        
+        for doc in documents:
+            try:
+                url = doc.get("url", "").strip()
+                content = doc.get("content", "").strip()
+                
+                if not url:
+                    skipped += 1
+                    continue
+                
+                if not content:
+                    skipped += 1
+                    continue
+                
+                # Check if already imported
+                if self.store.get_doc(url):
+                    skipped += 1
+                    continue
+                
+                # Import to backend
+                metadata = {
+                    "title": doc.get("title", ""),
+                    "source": "frontend_payload",
+                    "imported_at": str(time.time()),
+                }
+                
+                self.store.save_doc(
+                    url=url,
+                    content=content,
+                    metadata=metadata,
+                    code_blocks=doc.get("code_blocks", []),
+                    topics=doc.get("topics", []),
+                )
+                imported += 1
+            except Exception as e:
+                errors.append({"doc": doc.get("url", "unknown"), "error": str(e)})
+        
+        # Save to persistent storage
+        self.store._push_to_redis()
+        self.cache.clear()
+        
+        return {
+            "success": imported > 0,
+            "imported": imported,
+            "skipped": skipped,
+            "errors": errors,
+            "source": source,
+            "note": f"Now you can use get_doc with any of the {imported} imported URLs",
+            "environment": "vercel" if os.environ.get("VERCEL") else "local"
+        }
+
+
+    # ------------------------------------------------------------------ #
     # Helper methods for new tools
     def _extract_imports(self, code: str, language: str) -> List[str]:
         """Extract imports from code."""
