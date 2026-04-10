@@ -26,7 +26,7 @@ from utils.normalize import normalize_url
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "🦇 Scrapee"
 SERVER_VERSION = "1.0.0"
-SCRAPE_TIMEOUT_SECONDS = 8
+SCRAPE_TIMEOUT_SECONDS = 60  # Increased for multi-page crawling (from 8s)
 
 
 IMPORT_ERRORS: Dict[str, str] = {}
@@ -1467,10 +1467,14 @@ class MCPServer:
         return payload
 
     def _tool_scrape_url(self, args: Dict) -> Dict:
-        """Fetch a URL, extract text + code blocks, and store it."""
+        """Fetch a URL, extract text + code blocks, and store it.
+        
+        Crawls all discovered pages (default max_depth=2 to follow links).
+        Stores ALL pages with extracted code blocks to SQLite.
+        """
         raw_url = str(args.get("url", "")).strip()
         mode = str(args.get("mode", "smart")).strip().lower() or "smart"
-        max_depth = self._coerce_int(args.get("max_depth", 0), default=0, minimum=0, maximum=2)
+        max_depth = self._coerce_int(args.get("max_depth", 2), default=2, minimum=0, maximum=2)
 
         if not raw_url:
             return {"error": "url is required"}
@@ -1506,7 +1510,32 @@ class MCPServer:
         stored_urls: List[str] = []
         skipped: List[Dict[str, str]] = []
 
-        for page_url, html in (pages or {}).items():
+        # Normalize crawler output: some crawlers return dict(url->html),
+        # others (SmartCrawler) return list[ScrapedDocument] or list[dict].
+        normalized_pages: Dict[str, Dict[str, Any]] = {}
+        if isinstance(pages, dict):
+            # Dict format: {url: html_string}
+            for url, html in pages.items():
+                normalized_pages[url] = {"html": html}
+        elif isinstance(pages, list):
+            for doc in pages:
+                if isinstance(doc, dict):
+                    u = doc.get("url")
+                    if u:
+                        normalized_pages[u] = doc
+                else:
+                    # Attempt to read attributes from ScrapedDocument objects
+                    u = getattr(doc, "url", None)
+                    if u:
+                        normalized_pages[u] = {
+                            "html": getattr(doc, "content", ""),
+                            "code_blocks": getattr(doc, "code_blocks", []),
+                            "topics": getattr(doc, "topics", []),
+                        }
+        else:
+            normalized_pages = {}
+
+        for page_url, page_data in (normalized_pages or {}).items():
             normalized_page_url = normalize_url(page_url)
             page_valid, page_error = self._validate_scrape_url(normalized_page_url)
             if not page_valid:
@@ -1514,14 +1543,34 @@ class MCPServer:
                 continue
 
             try:
-                parsed = self.scraper.parse_html(html, normalized_page_url)
-                self.store.save_doc(
-                    normalized_page_url,
-                    parsed.get("content", ""),
-                    metadata=parsed.get("metadata", {}),
-                    code_blocks=parsed.get("code_blocks", []),
-                    topics=parsed.get("topics", []),
-                )
+                # If page_data has pre-extracted code_blocks (from SmartCrawler), use them
+                # Otherwise, parse HTML and extract
+                if "code_blocks" in page_data and page_data["code_blocks"]:
+                    # Already extracted by crawler
+                    html_content = page_data.get("html", "")
+                    code_blocks = page_data.get("code_blocks", [])
+                    topics = page_data.get("topics", [])
+                    
+                    # Still parse HTML to get metadata and clean content
+                    parsed = self.scraper.parse_html(html_content, normalized_page_url)
+                    self.store.save_doc(
+                        normalized_page_url,
+                        parsed.get("content", ""),
+                        metadata=parsed.get("metadata", {}),
+                        code_blocks=code_blocks,  # Use pre-extracted blocks
+                        topics=topics if topics else parsed.get("topics", []),
+                    )
+                else:
+                    # No pre-extracted data, parse from HTML string
+                    html = page_data.get("html", "")
+                    parsed = self.scraper.parse_html(html, normalized_page_url)
+                    self.store.save_doc(
+                        normalized_page_url,
+                        parsed.get("content", ""),
+                        metadata=parsed.get("metadata", {}),
+                        code_blocks=parsed.get("code_blocks", []),
+                        topics=parsed.get("topics", []),
+                    )
                 stored_urls.append(normalized_page_url)
             except Exception as exc:
                 skipped.append({"url": normalized_page_url, "reason": str(exc)})

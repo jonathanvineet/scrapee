@@ -333,7 +333,10 @@ class SQLiteStore:
                 cursor.executemany("DELETE FROM code_fts WHERE rowid = ?", [(code_id,) for code_id in old_code_ids])
             cursor.execute("DELETE FROM code_blocks WHERE doc_id = ?", (doc_id,))
 
-            for block in self._dedupe_code_blocks(code_blocks or []):
+            dedupe_blocks = self._dedupe_code_blocks(code_blocks or [])
+            print(f"[DEBUG] Code blocks to insert: {len(dedupe_blocks)} (raw: {len(code_blocks or [])})")
+            
+            for block in dedupe_blocks:
                 cursor.execute(
                     """
                     INSERT INTO code_blocks (doc_id, snippet, language, context, line_number)

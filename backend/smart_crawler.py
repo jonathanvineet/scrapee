@@ -135,23 +135,12 @@ def _extract_prose(soup: BeautifulSoup) -> str:
     return "\n".join(parts)
 
 
+from smart_scraper import SmartScraper
+
 def _extract_code_blocks(soup: BeautifulSoup) -> list[dict]:
-    blocks = []
-    for pre in soup.find_all("pre"):
-        code = pre.find("code")
-        snippet = (code or pre).get_text(strip=True)
-        if len(snippet) < 10:
-            continue
-        # Detect language from class attribute: "language-python", "lang-js", etc.
-        lang = ""
-        if code and code.get("class"):
-            for cls in code["class"]:
-                m = re.match(r"(?:language|lang)-(\w+)", cls, re.I)
-                if m:
-                    lang = m.group(1).lower()
-                    break
-        blocks.append({"snippet": snippet[:3000], "language": lang})
-    return blocks
+    """Extract code blocks using SmartScraper's comprehensive method."""
+    scraper = SmartScraper()
+    return scraper._extract_code_blocks(soup, "")  # url param only used for logging
 
 
 def _normalise_url(url: str) -> str:
