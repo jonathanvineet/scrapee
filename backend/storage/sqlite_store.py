@@ -14,6 +14,12 @@ try:
 except ImportError:
     REDIS_AVAILABLE = False
 
+try:
+    from storage.vector_store import get_vector_store, VECTOR_AVAILABLE
+except Exception:
+    get_vector_store = None
+    VECTOR_AVAILABLE = False
+
 
 def _running_on_vercel() -> bool:
     return bool(
@@ -398,6 +404,14 @@ class SQLiteStore:
             
             self.conn.commit()
             print(f"[SAVE] Stored: {url} ({len(content)} chars)")
+            
+            # Level 2 Semantic Vector Indexing
+            if VECTOR_AVAILABLE and get_vector_store:
+                try:
+                    vs = get_vector_store(self.conn)
+                    vs.index_doc(doc_id, content, title)
+                except Exception as e:
+                    print(f"[VEC] Error indexing doc {doc_id}: {e}")
             
             # Persist to Redis
             self._push_to_redis()

@@ -23,6 +23,34 @@ from smart_scraper import create_scraper
 from utils.normalize import normalize_url
 
 
+# ── Level 2: optional intelligence modules ──────────────────────────────────
+
+try:
+    from storage.vector_store import get_vector_store, VECTOR_AVAILABLE
+except Exception as _e:
+    get_vector_store = None
+    VECTOR_AVAILABLE = False
+    print(f"[L2] vector_store unavailable: {_e}")
+
+try:
+    from github_engine import GitHubRepoEngine
+    GITHUB_ENGINE_AVAILABLE = True
+except Exception as _e:
+    GitHubRepoEngine = None
+    GITHUB_ENGINE_AVAILABLE = False
+    print(f"[L2] github_engine unavailable: {_e}")
+
+try:
+    from auto_crawler import AutoCrawler
+    AUTO_CRAWLER_AVAILABLE = True
+except Exception as _e:
+    AutoCrawler = None
+    AUTO_CRAWLER_AVAILABLE = False
+    print(f"[L2] auto_crawler unavailable: {_e}")
+
+# ────────────────────────────────────────────────────────────────────────────
+
+
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "🦇 Scrapee"
 SERVER_VERSION = "1.0.0"
@@ -123,13 +151,45 @@ class MCPServer:
         self.cache = CacheLayer(ttl_seconds=300)
         self.name = SERVER_NAME
         self.version = SERVER_VERSION
-        
+
         # Strict mode: Only return content actually in the index, never hallucinate
         self.strict_mode = True
-        
+
+        # Domain memory: maps query keywords → best source URL found so far.
+        # Persists for the lifetime of the process — makes repeated queries instant.
+        self.domain_cache: Dict[str, str] = {}
+
+        # ── Level 2: Semantic vector search ───────────────────────────────
+        self.vector_store = None
+        if VECTOR_AVAILABLE and get_vector_store:
+            try:
+                self.vector_store = get_vector_store(self.store.conn)
+                print("[L2] ✓ Semantic vector search active")
+            except Exception as e:
+                print(f"[L2] Vector store init failed: {e}")
+
+        # ── Level 2: GitHub repo understanding engine ──────────────────────
+        self.github_engine = None
+        if GITHUB_ENGINE_AVAILABLE:
+            try:
+                self.github_engine = GitHubRepoEngine()
+                print("[L2] ✓ GitHub repo understanding engine active")
+            except Exception as e:
+                print(f"[L2] GitHub engine init failed: {e}")
+
+        # ── Level 2: Background auto-crawler ──────────────────────────────
+        self.auto_crawler = None
+        if AUTO_CRAWLER_AVAILABLE:
+            try:
+                self.auto_crawler = AutoCrawler(self.store, self.scraper)
+                self.auto_crawler.start()
+                print("[L2] ✓ Background auto-crawler started")
+            except Exception as e:
+                print(f"[L2] Auto-crawler init failed: {e}")
+
         # Auto-load frontend payloads on startup (works on local + Vercel)
         threading.Thread(target=self._auto_load_payloads, daemon=True).start()
-        
+
         # Bootstrap essential documentation on startup (in a background thread)
         threading.Thread(target=self._bootstrap_docs, daemon=True).start()
 
@@ -354,6 +414,20 @@ class MCPServer:
                                 "language": {"type": "string", "description": "Optional language filter (e.g. python, typescript)"},
                             },
                             "required": ["query"],
+                        },
+                    },
+                    {
+                        "name": "understand_repo",
+                        "description": (
+                            "Understand an entire GitHub repository structure, architecture, and public API. "
+                            "Use when asked about a codebase as a whole or to index a project from GitHub."
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "repo_url": {"type": "string", "description": "GitHub repository URL (e.g. https://github.com/owner/repo)"},
+                            },
+                            "required": ["repo_url"],
                         },
                     },
                     {
@@ -660,6 +734,7 @@ class MCPServer:
         tools = {
             "answer": self._tool_answer,
             "explain_code": self._tool_explain_code,
+            "understand_repo": self._tool_understand_repo,
             "search_or_scrape": self._tool_search_or_scrape,
             "search_and_get": self._tool_search_and_get,
             "scrape_url": self._tool_scrape_url,
@@ -1368,7 +1443,8 @@ class MCPServer:
           1. Search the index
           2. If empty → call ensure_context to build context
           3. Search again after ingestion
-          4. Return results (or empty with helpful guidance)
+          4. Boost results by source quality
+          5. Return results with graceful fallback (never silent empty)
         """
         query = args.get("query")
         if not query:
@@ -1378,16 +1454,74 @@ class MCPServer:
         results = []
         for attempt in range(2):
             results = self.store.search_and_get(query, limit=5)
-            if results:
+            
+            # Level 2 Semantic search merge
+            if self.vector_store:
+                vec_results = self.vector_store.semantic_search(query, limit=3)
+                seen_urls = {r.get("url") for r in results}
+                for vr in vec_results:
+                    if vr.get("url") not in seen_urls:
+                        results.append(vr)
+                        seen_urls.add(vr.get("url"))
+
+            if len(results) >= 2:
                 break
-            print(f"[ANSWER] Attempt {attempt + 1}: no results — ensuring context...")
+            
+            print(f"[ANSWER] Attempt {attempt + 1}: weak results — ensuring context...")
             self._tool_ensure_context({"query": query})
 
+        # Boost results by source domain quality
+        if results:
+            results = self._boost_results(results)
+
         print(f"[ANSWER] Query: {query!r} → {len(results)} results")
+
+        if not results or len(results) < 2:
+            if self.auto_crawler:
+                self.auto_crawler.record_miss(query)
+
+            if not results:
+                return {
+                    "query": query,
+                    "results": [],
+                    "count": 0,
+                    "fallback": "No indexed content found. Attempted scraping multiple sources.",
+                    "suggestion": "Try a more specific query, provide a direct documentation URL, or call scrape_url with a specific URL.",
+                }
+
         return {
             "query": query,
-            "results": results,
-            "count": len(results),
+            "results": results[:8], # Cap final results size
+            "count": min(len(results), 8),
+        }
+
+    def _tool_understand_repo(self, args: Dict) -> Dict:
+        """Level 2 Tool: Read + index an entire GitHub repository."""
+        repo_url = args.get("repo_url", "").strip()
+        if not repo_url:
+            return {"error": "repo_url required"}
+            
+        if not self.github_engine:
+            return {"error": "GitHub engine is not available. Please check dependencies or setup."}
+            
+        result = self.github_engine.understand(repo_url)
+        if "error" in result:
+            return result
+            
+        # Store the synthesized understanding into our primary index
+        self.store.save_doc(
+            url=f"github://{result.get('owner')}/{result.get('repo')}",
+            content=result.get("content", ""),
+            metadata=result.get("metadata", {}),
+            code_blocks=result.get("code_blocks", []),
+            topics=result.get("topics", []),
+        )
+        
+        return {
+            "status": "success",
+            "repo": f"{result.get('owner')}/{result.get('repo')}",
+            "overview": result.get("content", "")[:1500] + "...",
+            "metadata": result.get("metadata", {})
         }
 
     def _tool_explain_code(self, args: Dict) -> Dict:
@@ -1412,10 +1546,12 @@ class MCPServer:
         """Ensure documentation for a query exists in the index.
 
         Priority order:
-          1. Already indexed → cache hit, return immediately
-          2. Query is a URL → scrape directly
-          3. Expand query into multiple search angles
-          4. Generate + rank sources → scrape until context is satisfied
+          1. Domain cache hit → re-scrape known good source (fastest path)
+          2. Already indexed → index cache hit, return immediately
+          3. Query is a URL → scrape directly
+          4. Expand query → generate + rank official doc sources → scrape
+          5. Fallback: DDG search → extract + scrape real links
+          6. Final fallback: StackOverflow search link (last resort)
         """
         query = args.get("query", "")
         if not query:
@@ -1423,22 +1559,32 @@ class MCPServer:
 
         print(f"[CTX] Ensuring context for: {query!r}")
 
-        # STEP 1 — Cache hit
+        # STEP 1 — Domain memory hit (learned from previous successful scrapes)
+        cached_src = self.domain_cache.get(query.lower())
+        if cached_src:
+            print(f"[CTX] Domain memory hit: {cached_src}")
+            existing = self.store.search_docs(query, limit=1)
+            if existing:
+                return {"status": "ready", "source": "domain_cache"}
+            # Re-scrape the known good source
+            self._tool_scrape_url({"url": cached_src, "mode": "smart", "max_depth": 1})
+            return {"status": "refreshed", "source": cached_src}
+
+        # STEP 2 — Index cache hit
         existing = self.store.search_docs(query, limit=2)
         if existing:
             return {"status": "ready", "source": "cache", "results": len(existing)}
 
-        # STEP 2 — Direct URL
+        # STEP 3 — Direct URL
         if query.startswith("http"):
             print(f"[CTX] Direct URL detected — scraping: {query}")
             self._tool_scrape_url({"url": query, "mode": "smart", "max_depth": 1})
             return {"status": "scraped_url", "source": query}
 
-        # STEP 3 — Expand query into multiple angles
+        # STEP 4 — Expand → generate → rank → scrape official doc sources
         queries = self._expand_query(query)
         print(f"[CTX] Query expanded into {len(queries)} variants")
 
-        # STEP 4 — Generate, rank, and try each source
         all_sources: List[str] = []
         seen: set = set()
         for q in queries:
@@ -1458,13 +1604,43 @@ class MCPServer:
                 print(f"[CTX] Skipping {src}: {e}")
                 continue
 
-            # Check against original query AND expanded variants
             for q in queries:
                 if self.store.search_docs(q, limit=1):
-                    print(f"[CTX] Context satisfied by: {src}")
+                    print(f"[LEARN] {query!r} → {src}")
+                    self.domain_cache[query.lower()] = src  # Remember for next time
                     return {"status": "loaded", "source": src, "matched_query": q}
 
-        return {"status": "failed", "reason": "no usable content found for query"}
+        # STEP 5 — DDG fallback: fetch search page → extract real links → scrape them
+        import urllib.parse
+        ddg_url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query + ' documentation')}"
+        print(f"[CTX] DDG fallback: {ddg_url}")
+        try:
+            ddg_html = self.scraper.fetch_with_timeout(ddg_url, timeout=8)
+            if ddg_html:
+                extracted_links = self._extract_links(ddg_html)
+                print(f"[CTX] DDG extracted {len(extracted_links)} links")
+                for link in extracted_links:
+                    try:
+                        self._tool_scrape_url({"url": link, "mode": "smart", "max_depth": 1})
+                    except Exception:
+                        continue
+                    for q in queries:
+                        if self.store.search_docs(q, limit=1):
+                            print(f"[LEARN] {query!r} → {link} (via DDG)")
+                            self.domain_cache[query.lower()] = link
+                            return {"status": "loaded_via_ddg", "source": link, "matched_query": q}
+        except Exception as e:
+            print(f"[CTX] DDG fallback failed: {e}")
+
+        # STEP 6 — Final fallback: static links agents can follow
+        return {
+            "status": "failed",
+            "reason": "no usable content found for query",
+            "fallback_sources": [
+                f"https://github.com/search?q={urllib.parse.quote(query)}",
+                f"https://stackoverflow.com/search?q={urllib.parse.quote(query)}",
+            ],
+        }
 
     def _expand_query(self, query: str) -> List[str]:
         """Generate semantic query variants to increase source-matching surface."""
@@ -1880,14 +2056,16 @@ class MCPServer:
             except Exception as exc:
                 skipped.append({"url": normalized_page_url, "reason": str(exc)})
 
-        # Multi-page understanding: store a combined summary doc at the base URL
-        # This lets the agent search by domain root and get cross-page context.
+        # Multi-page understanding: store a combined summary doc keyed by domain.
+        # Using domain as the key guarantees stable, collision-free retrieval.
         if len(combined_contents) > 1:
             combined = "\n\n".join(c[:3000] for c in combined_contents[:5])
+            base_domain = urlparse(url).netloc
+            combined_key = f"https://{base_domain}/#combined"
             self.store.save_doc(
-                url + "#combined",
+                combined_key,
                 combined,
-                metadata={"title": f"Combined: {url}", "combined": True},
+                metadata={"title": f"Combined: {base_domain}", "combined": True, "source_url": url},
             )
 
         self.cache.clear()
@@ -2043,6 +2221,53 @@ class MCPServer:
 
         content_lower = content.lower()
         return not any(p in content_lower for p in bad_patterns)
+
+    def _extract_links(self, html: str, limit: int = 8) -> List[str]:
+        """Extract absolute HTTP links from an HTML page (e.g. DDG search results).
+
+        Filters out tracking redirects, ads, and known junk domains so only
+        real documentation / GitHub links reach the scraper.
+        """
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, "html.parser")
+        links: List[str] = []
+        skip_domains = {"duckduckgo.com", "google.com", "bing.com", "facebook.com",
+                        "twitter.com", "amazon.com", "youtube.com", "reddit.com"}
+        for a in soup.find_all("a", href=True):
+            href = str(a["href"])
+            if not href.startswith("http"):
+                continue
+            domain = urlparse(href).netloc.lstrip("www.")
+            if any(bad in domain for bad in skip_domains):
+                continue
+            if href not in links:
+                links.append(href)
+            if len(links) >= limit:
+                break
+        return links
+
+    def _boost_results(self, results: List[Dict]) -> List[Dict]:
+        """Re-score search results to surface official documentation first."""
+        boosted = []
+        for r in results:
+            url = r.get("url", "")
+            score = float(r.get("score", 0) or 0)
+
+            # Official doc sites get strongest boost
+            if "docs." in url or "/docs" in url or "/learn" in url or "/reference" in url:
+                score += 2.0
+            # GitHub is useful but secondary
+            elif "github.com" in url:
+                score += 0.5
+            # Combined cross-page docs are highly relevant
+            if "#combined" in url:
+                score += 1.0
+
+            r = dict(r)  # avoid mutating cached objects
+            r["score"] = round(score, 4)
+            boosted.append(r)
+
+        return sorted(boosted, key=lambda x: x["score"], reverse=True)
 
     # ------------------------------------------------------------------ #
     # Auto-ingestion helpers                                                #
