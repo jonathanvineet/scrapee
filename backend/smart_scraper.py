@@ -349,8 +349,13 @@ class SmartScraper:
         """
         print(f"[SCRAPE] Processing: {url}")
 
-        # Raw pass-through for XML files and GitHub raw URLs — no HTML parsing needed
-        if url.endswith(".xml") or "github.com" in url:
+        # Rewrite GitHub blob viewer URLs to raw file URLs
+        if "github.com" in url and "/blob/" in url:
+            url = url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+            print(f"[SCRAPE] Rewrote to raw URL: {url}")
+
+        # Raw pass-through for XML/JSON files and GitHub raw URLs — no HTML parsing needed
+        if url.endswith(".xml") or url.endswith(".json") or "github.com" in url:
             html = self.fetch_with_timeout(url, timeout=timeout)
             if html:
                 return {

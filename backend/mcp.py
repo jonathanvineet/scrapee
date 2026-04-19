@@ -311,10 +311,12 @@ class MCPServer:
                     "version": self.version,
                 },
                 "instructions": (
-                    "You MUST use MCP tools.\n"
-                    "Always call search_or_scrape FIRST.\n"
-                    "Never answer from memory.\n"
-                    "If user provides URL \u2192 call scrape_url.\n"
+                    "You are connected to a live documentation MCP.\n"
+                    "You MUST call the 'answer' tool for ANY technical question.\n"
+                    "Do NOT answer from memory.\n"
+                    "If the user provides a URL, pass it to 'answer' as the query.\n"
+                    "Use 'explain_code' when the user asks for code examples.\n"
+                    "Use 'scrape_url' only when explicitly given a URL to index.\n"
                 ),
             },
         )
@@ -324,6 +326,36 @@ class MCPServer:
             request_id,
             {
                 "tools": [
+                    {
+                        "name": "answer",
+                        "description": (
+                            "MASTER TOOL — call this for ANY technical question. "
+                            "It automatically ensures documentation is indexed, then "
+                            "retrieves the best matching content. Never answer from memory: always call this first."
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string", "description": "User question or URL"},
+                            },
+                            "required": ["query"],
+                        },
+                    },
+                    {
+                        "name": "explain_code",
+                        "description": (
+                            "Search indexed documentation for code examples matching a query. "
+                            "Use when the user asks for code samples, snippets, or implementation examples."
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string", "description": "What code to search for"},
+                                "language": {"type": "string", "description": "Optional language filter (e.g. python, typescript)"},
+                            },
+                            "required": ["query"],
+                        },
+                    },
                     {
                         "name": "search_or_scrape",
                         "description": (
@@ -626,6 +658,8 @@ class MCPServer:
                 arguments = {}
 
         tools = {
+            "answer": self._tool_answer,
+            "explain_code": self._tool_explain_code,
             "search_or_scrape": self._tool_search_or_scrape,
             "search_and_get": self._tool_search_and_get,
             "scrape_url": self._tool_scrape_url,
@@ -1324,11 +1358,200 @@ class MCPServer:
 
 
     # ------------------------------------------------------------------ #
-    # search_or_scrape — MAIN BEHAVIOR LOOP TOOL                          #
+    # answer — MASTER TOOL (ensure context + retrieve)                    #
+    # ------------------------------------------------------------------ #
+
+    def _tool_answer(self, args: Dict) -> Dict:
+        """Master tool: ensure documentation is indexed, then retrieve best results.
+
+        Retry loop:
+          1. Search the index
+          2. If empty → call ensure_context to build context
+          3. Search again after ingestion
+          4. Return results (or empty with helpful guidance)
+        """
+        query = args.get("query")
+        if not query:
+            return {"error": "query required"}
+
+        # Retry loop: up to 2 passes (search → ingest → search again)
+        results = []
+        for attempt in range(2):
+            results = self.store.search_and_get(query, limit=5)
+            if results:
+                break
+            print(f"[ANSWER] Attempt {attempt + 1}: no results — ensuring context...")
+            self._tool_ensure_context({"query": query})
+
+        print(f"[ANSWER] Query: {query!r} → {len(results)} results")
+        return {
+            "query": query,
+            "results": results,
+            "count": len(results),
+        }
+
+    def _tool_explain_code(self, args: Dict) -> Dict:
+        """Search indexed code blocks for examples matching the query."""
+        query = args.get("query")
+        if not query:
+            return {"error": "query required"}
+        language = str(args.get("language", "")).strip() or None
+        code = self.store.search_code(query, language=language, limit=5)
+        return {
+            "query": query,
+            "language": language,
+            "count": len(code),
+            "results": code,
+        }
+
+    # ------------------------------------------------------------------ #
+    # ensure_context — BRAIN (multi-source auto-ingestion)               #
+    # ------------------------------------------------------------------ #
+
+    def _tool_ensure_context(self, args: Dict) -> Dict:
+        """Ensure documentation for a query exists in the index.
+
+        Priority order:
+          1. Already indexed → cache hit, return immediately
+          2. Query is a URL → scrape directly
+          3. Expand query into multiple search angles
+          4. Generate + rank sources → scrape until context is satisfied
+        """
+        query = args.get("query", "")
+        if not query:
+            return {"error": "query required"}
+
+        print(f"[CTX] Ensuring context for: {query!r}")
+
+        # STEP 1 — Cache hit
+        existing = self.store.search_docs(query, limit=2)
+        if existing:
+            return {"status": "ready", "source": "cache", "results": len(existing)}
+
+        # STEP 2 — Direct URL
+        if query.startswith("http"):
+            print(f"[CTX] Direct URL detected — scraping: {query}")
+            self._tool_scrape_url({"url": query, "mode": "smart", "max_depth": 1})
+            return {"status": "scraped_url", "source": query}
+
+        # STEP 3 — Expand query into multiple angles
+        queries = self._expand_query(query)
+        print(f"[CTX] Query expanded into {len(queries)} variants")
+
+        # STEP 4 — Generate, rank, and try each source
+        all_sources: List[str] = []
+        seen: set = set()
+        for q in queries:
+            for src in self._generate_sources(q):
+                if src not in seen:
+                    all_sources.append(src)
+                    seen.add(src)
+
+        ranked = self._rank_sources(all_sources)
+        print(f"[CTX] Trying {len(ranked)} ranked sources")
+
+        for src in ranked:
+            print(f"[CTX] Trying source: {src}")
+            try:
+                self._tool_scrape_url({"url": src, "mode": "smart", "max_depth": 2})
+            except Exception as e:
+                print(f"[CTX] Skipping {src}: {e}")
+                continue
+
+            # Check against original query AND expanded variants
+            for q in queries:
+                if self.store.search_docs(q, limit=1):
+                    print(f"[CTX] Context satisfied by: {src}")
+                    return {"status": "loaded", "source": src, "matched_query": q}
+
+        return {"status": "failed", "reason": "no usable content found for query"}
+
+    def _expand_query(self, query: str) -> List[str]:
+        """Generate semantic query variants to increase source-matching surface."""
+        q = query.strip()
+        return [
+            q,
+            f"{q} documentation",
+            f"{q} api reference",
+            f"{q} tutorial",
+            f"{q} github",
+        ]
+
+    def _rank_sources(self, sources: List[str]) -> List[str]:
+        """Rank documentation sources: official docs first, GitHub last."""
+        priority: List[str] = []
+        secondary: List[str] = []
+        fallback: List[str] = []
+
+        for s in sources:
+            if "docs." in s or "/docs" in s or "/learn" in s or "/reference" in s:
+                priority.append(s)
+            elif "github.com" in s:
+                fallback.append(s)
+            else:
+                secondary.append(s)
+
+        return priority + secondary + fallback
+
+    def _generate_sources(self, query: str) -> List[str]:
+        """Generate a prioritised list of documentation URLs for a given query keyword."""
+        q = query.lower()
+        sources: List[str] = []
+
+        # --- Exact keyword → primary doc site ---
+        keyword_map = {
+            "react": "https://react.dev/learn",
+            "nextjs": "https://nextjs.org/docs",
+            "next.js": "https://nextjs.org/docs",
+            "hedera": "https://docs.hedera.com",
+            "python": "https://docs.python.org/3/",
+            "fastapi": "https://fastapi.tiangolo.com/",
+            "flask": "https://flask.palletsprojects.com/",
+            "sqlite": "https://www.sqlite.org/docs.html",
+            "docker": "https://docs.docker.com",
+            "kubernetes": "https://kubernetes.io/docs",
+            "solana": "https://solana.com/docs",
+            "rust": "https://doc.rust-lang.org",
+            "typescript": "https://www.typescriptlang.org/docs/",
+            "node": "https://nodejs.org/en/docs",
+            "postgresql": "https://www.postgresql.org/docs/",
+            "postgres": "https://www.postgresql.org/docs/",
+            "redis": "https://redis.io/docs/",
+            "mongodb": "https://www.mongodb.com/docs/",
+            "graphql": "https://graphql.org/learn/",
+            "openai": "https://platform.openai.com/docs",
+            "anthropic": "https://docs.anthropic.com",
+            "vercel": "https://vercel.com/docs",
+            "supabase": "https://supabase.com/docs",
+            "django": "https://docs.djangoproject.com/",
+            "express": "https://expressjs.com/en/guide/",
+            "vue": "https://vuejs.org/guide/",
+            "svelte": "https://svelte.dev/docs",
+            "tailwind": "https://tailwindcss.com/docs",
+            "prisma": "https://www.prisma.io/docs",
+            "stripe": "https://stripe.com/docs",
+            "aws": "https://docs.aws.amazon.com/",
+            "gcp": "https://cloud.google.com/docs",
+            "azure": "https://learn.microsoft.com/en-us/azure/",
+        }
+
+        for keyword, url in keyword_map.items():
+            if keyword in q:
+                sources.append(url)
+
+        # --- DOMAIN_HINTS fallback (existing system) ---
+        detected = self._detect_doc_domain(query)
+        if detected and detected not in sources:
+            sources.append(detected)
+
+        return sources
+
+    # ------------------------------------------------------------------ #
+    # search_or_scrape — BEHAVIOR LOOP TOOL                              #
     # ------------------------------------------------------------------ #
 
     def _tool_search_or_scrape(self, args: Dict) -> Dict:
-        """Primary tool: search the index, auto-scrape if empty, then return results.
+        """Search the index, auto-scrape if empty, then return results.
 
         Behavior loop:
           1. Search stored docs for the query
@@ -1578,6 +1801,7 @@ class MCPServer:
 
         stored_urls: List[str] = []
         skipped: List[Dict[str, str]] = []
+        combined_contents: List[str] = []  # For multi-page combined doc
 
         # Normalize crawler output: some crawlers return dict(url->html),
         # others (SmartCrawler) return list[ScrapedDocument] or list[dict].
@@ -1619,30 +1843,52 @@ class MCPServer:
                     html_content = page_data.get("html", "")
                     code_blocks = page_data.get("code_blocks", [])
                     topics = page_data.get("topics", [])
-                    
+
                     # Still parse HTML to get metadata and clean content
                     parsed = self.scraper.parse_html(html_content, normalized_page_url)
-                    self.store.save_doc(
-                        normalized_page_url,
-                        parsed.get("content", ""),
-                        metadata=parsed.get("metadata", {}),
-                        code_blocks=code_blocks,  # Use pre-extracted blocks
-                        topics=topics if topics else parsed.get("topics", []),
-                    )
+                    page_content = parsed.get("content", "")
+                    if self._is_useful(page_content):
+                        self.store.save_doc(
+                            normalized_page_url,
+                            page_content,
+                            metadata=parsed.get("metadata", {}),
+                            code_blocks=code_blocks,
+                            topics=topics if topics else parsed.get("topics", []),
+                        )
+                        combined_contents.append(page_content)
+                    else:
+                        skipped.append({"url": normalized_page_url, "reason": "content quality check failed"})
+                        continue
                 else:
                     # No pre-extracted data, parse from HTML string
                     html = page_data.get("html", "")
                     parsed = self.scraper.parse_html(html, normalized_page_url)
-                    self.store.save_doc(
-                        normalized_page_url,
-                        parsed.get("content", ""),
-                        metadata=parsed.get("metadata", {}),
-                        code_blocks=parsed.get("code_blocks", []),
-                        topics=parsed.get("topics", []),
-                    )
+                    page_content = parsed.get("content", "")
+                    if self._is_useful(page_content):
+                        self.store.save_doc(
+                            normalized_page_url,
+                            page_content,
+                            metadata=parsed.get("metadata", {}),
+                            code_blocks=parsed.get("code_blocks", []),
+                            topics=parsed.get("topics", []),
+                        )
+                        combined_contents.append(page_content)
+                    else:
+                        skipped.append({"url": normalized_page_url, "reason": "content quality check failed"})
+                        continue
                 stored_urls.append(normalized_page_url)
             except Exception as exc:
                 skipped.append({"url": normalized_page_url, "reason": str(exc)})
+
+        # Multi-page understanding: store a combined summary doc at the base URL
+        # This lets the agent search by domain root and get cross-page context.
+        if len(combined_contents) > 1:
+            combined = "\n\n".join(c[:3000] for c in combined_contents[:5])
+            self.store.save_doc(
+                url + "#combined",
+                combined,
+                metadata={"title": f"Combined: {url}", "combined": True},
+            )
 
         self.cache.clear()
         return {
@@ -1768,6 +2014,35 @@ class MCPServer:
             "example": f"scrape_url with url='{url}'",
             "strict_mode": True
         }
+
+    # ------------------------------------------------------------------ #
+    # Content quality helpers                                               #
+    # ------------------------------------------------------------------ #
+
+    def _is_useful(self, content: str) -> bool:
+        """Return True if the content is real documentation (not an error page or JS stub)."""
+        if not content or len(content.strip()) < 300:
+            return False
+
+        bad_patterns = [
+            "enable javascript",
+            "javascript is required",
+            "access denied",
+            "403 forbidden",
+            "404 not found",
+            "page not found",
+            "loading...",
+            "please wait",
+            "captcha",
+            "cloudflare",
+            "checking your browser",
+            "ddos protection",
+            "service unavailable",
+            "error 503",
+        ]
+
+        content_lower = content.lower()
+        return not any(p in content_lower for p in bad_patterns)
 
     # ------------------------------------------------------------------ #
     # Auto-ingestion helpers                                                #

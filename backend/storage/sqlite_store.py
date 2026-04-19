@@ -305,6 +305,17 @@ class SQLiteStore:
             scraped_at = datetime.utcnow().isoformat()
             
             cursor = self.conn.cursor()
+
+            # Content-level deduplication: skip if identical content already stored (different URL)
+            content_fingerprint = content[:500]
+            cursor.execute(
+                "SELECT id FROM docs WHERE content LIKE ? AND url != ?",
+                (content_fingerprint + "%", url),
+            )
+            if cursor.fetchone():
+                print(f"[SKIP] Duplicate content already stored: {url}")
+                return False
+
             cursor.execute("SELECT id FROM docs WHERE url = ?", (url,))
             existing = cursor.fetchone()
 
