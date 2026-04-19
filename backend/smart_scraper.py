@@ -189,6 +189,141 @@ class SmartScraper:
             "metadata": metadata,
         }
 
+    def _extract_github_readme(self, url: str, timeout: int = FETCH_TIMEOUT_SECONDS) -> Optional[str]:
+        """
+        Extract README.md content from GitHub repo (for project overview).
+        
+        Args:
+            url: GitHub URL (e.g., https://github.com/user/repo)
+            timeout: Seconds to wait
+        
+        Returns:
+            README content or None if not found
+        """
+        if "github.com" not in url:
+            return None
+        
+        # Convert to raw README URL
+        parts = url.rstrip("/").split("/")
+        if len(parts) < 5:  # https://github.com/user/repo minimum
+            return None
+        
+        owner, repo = parts[3], parts[4]
+        readme_url = f"https://raw.githubusercontent.com/{owner}/{repo}/main/README.md"
+        
+        html = self.fetch_with_timeout(readme_url, timeout=timeout)
+        return html if html else None
+    
+    def _extract_github_src_overview(self, url: str, timeout: int = FETCH_TIMEOUT_SECONDS) -> Dict:
+        """
+        Extract overview from GitHub repo src/ folder structure and key files.
+        
+        Identifies:
+        - Main source directory (src/, lib/, main/, etc.)
+        - Key files (main.py, app.py, index.js, etc.)
+        - Project structure from folder listing
+        
+        Args:
+            url: GitHub repo URL
+            timeout: Seconds to wait
+        
+        Returns:
+            Dict with structure, key_files, description
+        """
+        if "github.com" not in url:
+            return {}
+        
+        parts = url.rstrip("/").split("/")
+        if len(parts) < 5:
+            return {}
+        
+        owner, repo = parts[3], parts[4]
+        base_url = f"https://github.com/{owner}/{repo}"
+        
+        # Try to fetch the repo root to find src/ folder
+        html = self.fetch_with_timeout(base_url, timeout=timeout)
+        if not html:
+            return {}
+        
+        soup = BeautifulSoup(html, "html.parser")
+        
+        # Find folder/file listing
+        structure = {
+            "directories": [],
+            "key_files": [],
+            "languages": []
+        }
+        
+        # Look for file listing elements (GitHub shows folder/file structure)
+        for item in soup.find_all("a", {"data-name": True}):
+            name = item.get_text(strip=True)
+            if name in ["src", "source", "lib", "main", "app", "code"]:
+                structure["directories"].append(name)
+            elif name in ["main.py", "app.py", "index.js", "setup.py", "package.json", "pom.xml"]:
+                structure["key_files"].append(name)
+        
+        # Look for language indicators (GitHub shows programming language)
+        lang_elem = soup.find("span", {"itemprop": "programmingLanguage"})
+        if lang_elem:
+            structure["languages"].append(lang_elem.get_text(strip=True))
+        
+        return structure
+    
+    def extract_from_github(self, url: str, timeout: int = FETCH_TIMEOUT_SECONDS) -> Dict:
+        """
+        GitHub-aware extraction: README + structure + key source files.
+        
+        For "what does this project do?" queries on GitHub repos:
+        1. Extract README.md (project description)
+        2. Get repo structure (folders like src/)
+        3. Extract key file overview
+        
+        Args:
+            url: GitHub repo URL
+            timeout: Seconds to wait
+        
+        Returns:
+            Dict with readme_content, structure, description, code_snippets
+        """
+        result = {
+            "type": "github_repo",
+            "url": url,
+            "readme": None,
+            "structure": {},
+            "key_files": [],
+            "overview": ""
+        }
+        
+        # Try to get README
+        readme = self._extract_github_readme(url, timeout)
+        if readme:
+            result["readme"] = readme[:2000]  # First 2000 chars
+        
+        # Get structure
+        structure = self._extract_github_src_overview(url, timeout)
+        result["structure"] = structure
+        
+        # Build overview from README + structure
+        overview_parts = []
+        if result["readme"]:
+            # Extract first paragraph from README
+            lines = result["readme"].split("\n")
+            for line in lines:
+                if line.strip() and not line.startswith("#"):
+                    overview_parts.append(line.strip())
+                    if len(" ".join(overview_parts)) > 200:
+                        break
+        
+        if structure.get("directories"):
+            overview_parts.append(f"Main directories: {', '.join(structure['directories'])}")
+        
+        if structure.get("languages"):
+            overview_parts.append(f"Languages: {', '.join(structure['languages'])}")
+        
+        result["overview"] = " | ".join(overview_parts)
+        
+        return result
+
     def scrape(self, url: str, max_depth: int = 0, timeout: int = FETCH_TIMEOUT_SECONDS) -> Dict:
         """
         Scrape a single URL: fetch HTML, parse, and extract structured content.
@@ -201,6 +336,18 @@ class SmartScraper:
         Returns:
             Dict with keys: url, title, content, code_blocks, topics, or error key on failure
         """
+        # GitHub repo detection: use GitHub-specific extraction
+        if "github.com" in url and url.count("/") == 4:  # https://github.com/user/repo
+            github_result = self.extract_from_github(url, timeout)
+            # Merge GitHub data into standard format
+            return {
+                "url": url,
+                "title": f"GitHub: {url.split('/')[-1]}",
+                "content": github_result.get("overview", ""),
+                "code_blocks": [],
+                "metadata": github_result
+            }
+        
         # Validate URL
         valid, error_msg = self.validate_url(url)
         if not valid:

@@ -5,7 +5,8 @@ import re
 import sqlite3
 import threading
 from datetime import datetime
-from typing import Dict, List, Optional
+from difflib import SequenceMatcher
+from typing import Dict, List, Optional, Tuple
 
 try:
     import redis
@@ -448,9 +449,90 @@ class SQLiteStore:
         )
         return [dict(row) for row in cursor.fetchall()]
     
+    def _levenshtein_distance(self, s1: str, s2: str) -> int:
+        """Calculate Levenshtein distance between two strings (typo-tolerant)."""
+        if len(s1) < len(s2):
+            return self._levenshtein_distance(s2, s1)
+        if len(s2) == 0:
+            return len(s1)
+        
+        prev_row = range(len(s2) + 1)
+        for i, c1 in enumerate(s1):
+            curr_row = [i + 1]
+            for j, c2 in enumerate(s2):
+                insertions = prev_row[j + 1] + 1
+                deletions = curr_row[j] + 1
+                substitutions = prev_row[j] + (c1 != c2)
+                curr_row.append(min(insertions, deletions, substitutions))
+            prev_row = curr_row
+        return prev_row[-1]
+    
+    def _fuzzy_match(self, query: str, target: str, max_distance: int = 2) -> Tuple[bool, float]:
+        """
+        Fuzzy match with typo tolerance.
+        
+        Returns:
+            (is_match, similarity_score) where similarity_score is 0-1
+        """
+        distance = self._levenshtein_distance(query.lower(), target.lower())
+        is_match = distance <= max_distance
+        similarity = 1.0 - (distance / max(len(query), len(target)))
+        return is_match, similarity
+    
+    def _fuzzy_search_tokens(self, query: str, limit: int = 10) -> List[Dict]:
+        """
+        Fallback fuzzy search: tokenize query and find close matches in database.
+        Handles typos like 'devopssct' -> 'devopsct'.
+        
+        Returns:
+            List of matching documents sorted by similarity
+        """
+        tokens = query.lower().split()
+        if not tokens:
+            return []
+        
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT id, url, title, content FROM docs")
+        all_docs = [dict(row) for row in cursor.fetchall()]
+        
+        scored_results = []
+        for doc in all_docs:
+            doc_text = f"{doc['title']} {doc['content']}".lower()
+            doc_tokens = doc_text.split()
+            
+            # Score based on fuzzy matches of query tokens
+            total_score = 0.0
+            matched_tokens = 0
+            
+            for qt in tokens:
+                best_match_score = 0.0
+                for dt in doc_tokens:
+                    is_match, similarity = self._fuzzy_match(qt, dt, max_distance=2)
+                    if is_match and similarity > best_match_score:
+                        best_match_score = similarity
+                
+                if best_match_score > 0:
+                    total_score += best_match_score
+                    matched_tokens += 1
+            
+            # Only include docs that match at least one token
+            if matched_tokens > 0:
+                avg_score = total_score / len(tokens)
+                scored_results.append({
+                    'id': doc['id'],
+                    'url': doc['url'],
+                    'title': doc['title'],
+                    'snippet': doc['content'][:200] + "..." if len(doc['content']) > 200 else doc['content'],
+                    'score': avg_score
+                })
+        
+        # Sort by score descending
+        scored_results.sort(key=lambda x: x['score'], reverse=True)
+        return scored_results[:limit]
+    
     def search_docs(self, query: str, limit: int = 10) -> List[Dict]:
         """
-        Full-text search in documents.
+        Full-text search in documents with fuzzy/typo tolerance.
         
         Args:
             query: Search query
@@ -517,6 +599,17 @@ class SQLiteStore:
             fallback_results = [dict(row) for row in cursor.fetchall()]
             results.extend(fallback_results)
             print(f"[DEBUG] LIKE fallback found {len(fallback_results)} additional results")
+        
+        # Layer 3: Fuzzy search if still thin (handles typos like 'devopssct' -> 'devopsct')
+        if len(results) < limit * 0.5:
+            remaining = limit - len(results)
+            exclude_urls = {r["url"] for r in results}
+            fuzzy_results = self._fuzzy_search_tokens(query, limit=remaining)
+            fuzzy_results = [r for r in fuzzy_results if r["url"] not in exclude_urls]
+            
+            if fuzzy_results:
+                print(f"[DEBUG] Fuzzy search found {len(fuzzy_results)} results (typo-tolerant)")
+                results.extend(fuzzy_results)
             
         print(f"[DEBUG] Total results: {len(results)}")
         return results

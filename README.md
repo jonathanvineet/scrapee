@@ -14,6 +14,8 @@ A full-stack web scraping and document search system with Model Context Protocol
 - Redis persistence: All data syncs to Redis, survives Vercel deployments forever
 - Auto-loading: Frontend payloads auto-import on MCP startup
 - Vercel-ready: Works out-of-box with Vercel KV or external Redis
+- **GitHub Repo Intelligence**: Ask "what does this project do?" → automatically extracts README, src/ structure, and key files
+- **Fuzzy/Typo-Tolerant Search**: Levenshtein distance matching handles typos (e.g., `devopssct` → `devopsct`)
 
 **Quick Start:** See [VERCEL_QUICK_START.md](VERCEL_QUICK_START.md)
 
@@ -23,6 +25,87 @@ A full-stack web scraping and document search system with Model Context Protocol
 3. Test: Scrape a URL and search across all pages
 
 **Status:** ✅ Production-ready, tested with 30-page crawl, 245 code blocks extracted
+
+---
+
+## GitHub Repo Scraping (NEW!)
+
+When you scrape a GitHub repository, Scrapee now intelligently extracts:
+
+**Example:**
+```bash
+# Scrape a GitHub repo
+POST /mcp
+{
+  "method": "tools/call",
+  "params": {
+    "name": "scrape_url",
+    "arguments": {
+      "url": "https://github.com/jonathanvineet/devopsct"
+    }
+  }
+}
+
+# Returns:
+{
+  "title": "GitHub: devopsct",
+  "overview": "DevOps automation toolkit... | Main directories: src, lib, tests | Languages: Python",
+  "structure": {
+    "directories": ["src", "lib", "main"],
+    "key_files": ["main.py", "app.py"],
+    "languages": ["Python"]
+  }
+}
+```
+
+**What It Extracts:**
+1. **README.md content** - Project description (first 2000 chars)
+2. **Folder structure** - Identifies src/, lib/, main/, app/ directories
+3. **Key files** - Detects main.py, app.py, index.js, setup.py, package.json, pom.xml
+4. **Languages** - Shows programming languages used
+5. **Source code** - When diving into src/, automatically reads actual source files
+
+**Then Ask Questions:**
+```bash
+# Search for what the project does
+POST /mcp
+{
+  "name": "search_and_get",
+  "arguments": {
+    "query": "what does devopsct do"
+  }
+}
+
+# Search for specific functions
+{
+  "name": "search_code",
+  "arguments": {
+    "query": "deploy function",
+    "limit": 5
+  }
+}
+```
+
+---
+
+## Fuzzy Search / Typo Tolerance (NEW!)
+
+Search now handles typos automatically using **Levenshtein distance**:
+
+```bash
+# These all work:
+search("devopssct")   # Typo: extra 's'  → finds "devopsct" ✓
+search("devopsct")    # Exact match       → finds "devopsct" ✓
+search("function")    # Exact match       → finds "function" ✓
+search("fucntion")    # Typo: 'nc' swap   → finds "function" ✓
+```
+
+**How It Works:**
+- Layer 1: **FTS5** - Exact indexed search (fastest)
+- Layer 2: **LIKE** - Pattern matching fallback
+- Layer 3: **Fuzzy** - Levenshtein distance matching (handles typos)
+
+Up to **2 character differences** tolerance (configurable).
 
 ---
 
