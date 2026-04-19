@@ -285,16 +285,24 @@ class SQLiteStore:
             topics: List of dicts with topic, heading, level, content
         
         Returns:
-            True if successful
+            True if successful, False if skipped or error
         """
+        metadata = metadata or {}
+
+        # 🚨 HARD VALIDATION — skip low-quality content
+        if not content or len(content.strip()) < 200:
+            print(f"[SKIP] Low-quality content: {url}")
+            return False
+
+        if not code_blocks and len(content.split()) < 50:
+            print(f"[SKIP] No useful data: {url}")
+            return False
+
         try:
-            metadata = metadata or {}
             title = metadata.get("title", "")
             domain = self._extract_domain(url)
             language = metadata.get("language", "")
             scraped_at = datetime.utcnow().isoformat()
-            
-            print(f"[DEBUG] Saving doc: {url!r} with title: {title!r}, content length: {len(content)}")
             
             cursor = self.conn.cursor()
             cursor.execute("SELECT id FROM docs WHERE url = ?", (url,))
@@ -302,7 +310,6 @@ class SQLiteStore:
 
             if existing:
                 doc_id = existing["id"]
-                print(f"[DEBUG] Updating existing doc id={doc_id}")
                 cursor.execute(
                     """
                     UPDATE docs
@@ -320,14 +327,13 @@ class SQLiteStore:
                     (url, title, content, domain, language, scraped_at, json.dumps(metadata)),
                 )
                 doc_id = cursor.lastrowid
-                print(f"[DEBUG] Created new doc id={doc_id}")
 
+            # FTS index
             cursor.execute("DELETE FROM docs_fts WHERE rowid = ?", (doc_id,))
             cursor.execute(
                 "INSERT INTO docs_fts(rowid, title, content, url) VALUES (?, ?, ?, ?)",
                 (doc_id, title, content, url),
             )
-            print(f"[DEBUG] Indexed in FTS5 with rowid={doc_id}")
 
             old_code_ids = [row["id"] for row in cursor.execute("SELECT id FROM code_blocks WHERE doc_id = ?", (doc_id,)).fetchall()]
             if old_code_ids:
@@ -335,7 +341,6 @@ class SQLiteStore:
             cursor.execute("DELETE FROM code_blocks WHERE doc_id = ?", (doc_id,))
 
             dedupe_blocks = self._dedupe_code_blocks(code_blocks or [])
-            print(f"[DEBUG] Code blocks to insert: {len(dedupe_blocks)} (raw: {len(code_blocks or [])})")
             
             for block in dedupe_blocks:
                 cursor.execute(
@@ -381,6 +386,7 @@ class SQLiteStore:
                 )
             
             self.conn.commit()
+            print(f"[SAVE] Stored: {url} ({len(content)} chars)")
             
             # Persist to Redis
             self._push_to_redis()
@@ -545,7 +551,7 @@ class SQLiteStore:
         prepared_query = self._prepare_fts_query(query)
         like_query = f"%{query}%"
         
-        print(f"[DEBUG] Searching for: {query!r} → FTS: {prepared_query!r}")
+        print(f"[SEARCH] Query: {query!r} → FTS: {prepared_query!r}")
         
         # FTS5 MATCH cannot be combined with OR on external tables directly in SQLite.
         # We run the FTS query first.
@@ -567,9 +573,9 @@ class SQLiteStore:
                 (prepared_query, limit),
             )
             results = [dict(row) for row in cursor.fetchall()]
-            print(f"[DEBUG] FTS found {len(results)} results")
+            print(f"[SEARCH] FTS found {len(results)} results")
         except Exception as e:
-            print(f"[DEBUG] FTS search failed: {e}, falling back to LIKE")
+            print(f"[SEARCH] FTS search failed: {e}, falling back to LIKE")
             results = []
         
         # Fallback to LIKE if FTS yields fewer results than limit
@@ -598,7 +604,7 @@ class SQLiteStore:
                 
             fallback_results = [dict(row) for row in cursor.fetchall()]
             results.extend(fallback_results)
-            print(f"[DEBUG] LIKE fallback found {len(fallback_results)} additional results")
+            print(f"[SEARCH] LIKE fallback found {len(fallback_results)} additional results")
         
         # Layer 3: Fuzzy search if still thin (handles typos like 'devopssct' -> 'devopsct')
         if len(results) < limit * 0.5:
@@ -608,10 +614,10 @@ class SQLiteStore:
             fuzzy_results = [r for r in fuzzy_results if r["url"] not in exclude_urls]
             
             if fuzzy_results:
-                print(f"[DEBUG] Fuzzy search found {len(fuzzy_results)} results (typo-tolerant)")
+                print(f"[SEARCH] Fuzzy search found {len(fuzzy_results)} results (typo-tolerant)")
                 results.extend(fuzzy_results)
             
-        print(f"[DEBUG] Total results: {len(results)}")
+        print(f"[SEARCH] Query: {query} → {len(results)} results")
         return results
 
     def search_and_get(self, query: str, limit: int = 5, snippet_length: int = 400) -> List[Dict]:

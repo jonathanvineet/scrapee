@@ -281,12 +281,13 @@ class MCPServer:
 
         handler = handlers.get(method)
         if handler is None:
-            if request_id is None:
-                return None
             return self._error_response(request_id, -32601, f"Method not found: {method}")
 
         try:
-            return handler(request_id, params)
+            response = handler(request_id, params)
+            if response is None:
+                return self._success_response(request_id, None)
+            return response
         except Exception as exc:
             return self._error_response(request_id, -32603, f"Internal error: {exc}")
 
@@ -309,6 +310,12 @@ class MCPServer:
                     "title": self.name,
                     "version": self.version,
                 },
+                "instructions": (
+                    "You MUST use MCP tools.\n"
+                    "Always call search_or_scrape FIRST.\n"
+                    "Never answer from memory.\n"
+                    "If user provides URL \u2192 call scrape_url.\n"
+                ),
             },
         )
 
@@ -317,6 +324,21 @@ class MCPServer:
             request_id,
             {
                 "tools": [
+                    {
+                        "name": "search_or_scrape",
+                        "description": (
+                            "MAIN TOOL. Always call this first. It searches docs and auto-scrapes if missing. "
+                            "Searches indexed documentation and automatically fetches and indexes missing documentation "
+                            "when the index is empty. Prefer this over multiple separate tool calls."
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string", "description": "Search query"},
+                            },
+                            "required": ["query"],
+                        },
+                    },
                     {
                         "name": "search_and_get",
                         "description": (
@@ -604,6 +626,7 @@ class MCPServer:
                 arguments = {}
 
         tools = {
+            "search_or_scrape": self._tool_search_or_scrape,
             "search_and_get": self._tool_search_and_get,
             "scrape_url": self._tool_scrape_url,
             "search_docs": self._tool_search_docs,
@@ -1299,6 +1322,52 @@ class MCPServer:
             "environment": "vercel" if os.environ.get("VERCEL") else "local"
         }
 
+
+    # ------------------------------------------------------------------ #
+    # search_or_scrape — MAIN BEHAVIOR LOOP TOOL                          #
+    # ------------------------------------------------------------------ #
+
+    def _tool_search_or_scrape(self, args: Dict) -> Dict:
+        """Primary tool: search the index, auto-scrape if empty, then return results.
+
+        Behavior loop:
+          1. Search stored docs for the query
+          2. If no results found → detect likely doc domain → scrape it
+          3. Search again after scraping
+          4. Return whatever was found
+        """
+        query = args.get("query")
+        if not query:
+            return {"error": "query required"}
+
+        print(f"[SEARCH] Query: {query} → searching index...")
+
+        # STEP 1 — SEARCH
+        results = self.store.search_and_get(query, limit=5)
+
+        # STEP 2 — IF EMPTY → SCRAPE
+        if not results:
+            print(f"[AUTO SCRAPE] No results for: {query}")
+
+            url = self._detect_doc_domain(query)
+
+            if url:
+                print(f"[SCRAPE] Processing: {url}")
+                self._tool_scrape_url({
+                    "url": url,
+                    "mode": "smart",
+                    "max_depth": 2
+                })
+
+                # STEP 3 — SEARCH AGAIN
+                results = self.store.search_and_get(query, limit=5)
+
+        print(f"[SEARCH] Query: {query} → {len(results)} results")
+        return {
+            "query": query,
+            "results": results,
+            "count": len(results)
+        }
 
     # ------------------------------------------------------------------ #
     # Helper methods for new tools

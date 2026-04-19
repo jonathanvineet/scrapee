@@ -368,8 +368,8 @@ def mcp():
 
     response = mcp_server.handle_request(data)
     if response is None:
-        return "", 204
-    return jsonify(response)
+        response = {"jsonrpc": "2.0", "result": None}
+    return jsonify(response), 200
 
 
 if __name__ == "__main__":

@@ -269,6 +269,17 @@ class SmartScraper:
         
         return structure
     
+    def extract_fallback(self, html: str) -> Dict:
+        """Raw BeautifulSoup fallback extractor — used when structured parsing yields too little."""
+        soup = BeautifulSoup(html, "html.parser")
+        text = soup.get_text(separator=" ", strip=True)
+        return {
+            "content": text[:50000],
+            "code_blocks": [],
+            "topics": [],
+            "metadata": {"title": ""}
+        }
+
     def extract_from_github(self, url: str, timeout: int = FETCH_TIMEOUT_SECONDS) -> Dict:
         """
         GitHub-aware extraction: README + structure + key source files.
@@ -336,6 +347,21 @@ class SmartScraper:
         Returns:
             Dict with keys: url, title, content, code_blocks, topics, or error key on failure
         """
+        print(f"[SCRAPE] Processing: {url}")
+
+        # Raw pass-through for XML files and GitHub raw URLs — no HTML parsing needed
+        if url.endswith(".xml") or "github.com" in url:
+            html = self.fetch_with_timeout(url, timeout=timeout)
+            if html:
+                return {
+                    "url": url,
+                    "title": "Raw File",
+                    "content": html[:50000],
+                    "code_blocks": [],
+                    "topics": [],
+                    "metadata": {"title": "Raw File"}
+                }
+
         # GitHub repo detection: use GitHub-specific extraction
         if "github.com" in url and url.count("/") == 4:  # https://github.com/user/repo
             github_result = self.extract_from_github(url, timeout)
@@ -362,6 +388,11 @@ class SmartScraper:
         
         # Parse and extract
         parsed = self.parse_html(html, url)
+
+        # If parsed content is thin, use raw fallback
+        if not parsed.get("content") or len(parsed["content"]) < 200:
+            print("[FALLBACK] Using raw extraction")
+            parsed = self.extract_fallback(html)
         
         # Validate content
         content = parsed.get("content", "").strip()
