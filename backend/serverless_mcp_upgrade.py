@@ -118,47 +118,58 @@ class DomainLearner:
 # 3. NON-BLOCKING BACKGROUND SCRAPE TRIGGER
 # ─────────────────────────────────────────────────────────────────────────────
 
-def trigger_background_scrape(query: str, urls: Optional[List[str]] = None, timeout: int = 2) -> bool:
+def trigger_background_scrape(query: str, urls: Optional[List[str]] = None) -> bool:
     """
     Fire-and-forget background scrape trigger.
     
-    SERVERLESS-SAFE:
-    - Uses threading.Thread with daemon=True
-    - Non-blocking (doesn't wait)
-    - Timeout-protected (2 seconds max)
+    VERCEL-SAFE:
+    - Uses direct HTTP POST (not threading)
+    - Fire-and-forget pattern
+    - Doesn't wait for response
+    - Short timeout (1s) to prevent blocking
+    
+    WHY NOT THREADING:
+    - Serverless functions terminate after response
+    - Threads may not execute or get killed
+    - Direct HTTP POST is reliable on Vercel
     
     Args:
         query: User query (for logging)
-        urls: List of URLs to scrape (top 3 used)
-        timeout: HTTP timeout in seconds
+        urls: List of URLs to scrape (top 2 used)
     
     Returns:
         True if trigger succeeded, False if failed
     """
-    def _background_scrape():
+    try:
+        base_url = os.getenv("BASE_URL")
+        if not base_url:
+            print(f"[Background] BASE_URL not set, skipping")
+            return False
+        
+        # Call internal background scrape endpoint
+        endpoint = f"{base_url}/api/internal/background_scrape"
+        payload = {
+            "query": query,
+            "urls": urls[:2] if urls else []  # LIMIT: Only 2 URLs
+        }
+        
+        # Fire and forget: Very short timeout to prevent blocking
+        # This starts the request but doesn't wait for completion
         try:
-            base_url = os.getenv("BASE_URL")
-            if not base_url:
-                print(f"[Background] BASE_URL not set, skipping background scrape")
-                return
-            
-            # Call internal background scrape endpoint
-            endpoint = f"{base_url}/api/internal/background_scrape"
-            payload = {
-                "query": query,
-                "urls": urls[:3] if urls else []
-            }
-            
-            # Fire and forget (don't wait)
-            requests.post(endpoint, json=payload, timeout=timeout)
-        except Exception as e:
-            # Silently fail (don't block user)
-            print(f"[Background] Scrape trigger failed: {e}")
-
-    # Start as daemon thread (won't keep process alive)
-    thread = threading.Thread(target=_background_scrape, daemon=True)
-    thread.start()
-    return True
+            requests.post(
+                endpoint,
+                json=payload,
+                timeout=1  # CRITICAL: 1s timeout (fire-and-forget)
+            )
+        except requests.exceptions.Timeout:
+            # Timeout is expected and OK (we didn't wait anyway)
+            pass
+        
+        return True
+    except Exception as e:
+        # Silently fail (don't block user)
+        print(f"[Background] Scrape trigger failed: {e}")
+        return False
 
 
 # ─────────────────────────────────────────────────────────────────────────────

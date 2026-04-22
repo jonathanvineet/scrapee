@@ -379,13 +379,14 @@ def background_scrape():
     """
     Internal endpoint for non-blocking background scraping.
     
-    Called via fire-and-forget trigger from MCP tools.
-    Completes within 8-15 seconds (Vercel-safe).
+    Called via fire-and-forget HTTP POST from MCP tools.
+    Completes within 8 seconds (Vercel-safe with buffer).
     
-    SERVERLESS-SAFE:
-    - Designed to complete within 30 seconds
+    VERCEL-SAFE:
+    - Limits to 2 URLs (prevents long execution)
+    - Hard 8-second timeout guard
     - Doesn't block user-facing requests
-    - Called from daemon thread (won't crash if timeout)
+    - Uses direct HTTP (not threading)
     """
     data = request.json or {}
     query = data.get("query", "").strip()
@@ -394,9 +395,19 @@ def background_scrape():
     if not urls:
         return jsonify({"status": "skipped", "reason": "no urls"}), 200
     
-    # Process URLs (top 3)
+    # HARD LIMIT: 8-second timeout guard
+    start_time = time.time()
+    max_duration = 8  # Vercel safety margin
+    
+    # Process URLs (top 2 ONLY, not 5)
     scraped_count = 0
-    for url in urls[:3]:
+    for url in urls[:2]:  # CRITICAL: Limited to 2 URLs
+        # Check timeout before each URL
+        elapsed = time.time() - start_time
+        if elapsed > max_duration:
+            print(f"[Background] Timeout: stopping after {elapsed:.1f}s")
+            break
+        
         try:
             # Quick scrape: shallow depth, small batch
             result = mcp_server._tool_scrape_url({

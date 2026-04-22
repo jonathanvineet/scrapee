@@ -299,12 +299,45 @@ class SmartCrawler:
         self, url: str, depth: int, score: int
     ) -> Optional[tuple[Optional[ScrapedDocument], list[str]]]:
         """Fetch a page and return (document, child_links) together."""
+        
+        # FIX: Convert GitHub blob URLs to raw content URLs
+        if "github.com" in url and "/blob/" in url:
+            original_url = url
+            url = url.replace("github.com", "raw.githubusercontent.com")
+            url = url.replace("/blob/", "/")
+            logger.debug(f"[GitHub] Converted blob to raw: {original_url} -> {url}")
+        
         try:
             resp = self.session.get(url, timeout=self.timeout, allow_redirects=True)
             if resp.status_code != 200:
                 logger.debug("HTTP %d for %s", resp.status_code, url)
                 return None
-            if "text/html" not in resp.headers.get("content-type", ""):
+            
+            # FIX: Handle XML/JSON files (raw content, not HTML parsing)
+            content_type = resp.headers.get("content-type", "").lower()
+            is_raw_text = any(t in content_type for t in [
+                "application/json",
+                "application/xml",
+                "text/xml",
+                "text/plain"
+            ])
+            
+            if is_raw_text or url.endswith(('.xml', '.json', '.txt', '.py', '.js', '.sh')):
+                # Store raw file content as-is
+                domain = urlparse(url).netloc
+                doc = ScrapedDocument(
+                    url=url,
+                    title=url.split('/')[-1],  # Filename as title
+                    content=resp.text[:5000],  # First 5000 chars
+                    code_blocks=[],
+                    domain=domain,
+                    depth=depth,
+                    links=[],  # No links from raw files
+                )
+                logger.debug(f"[Raw Content] Stored {len(resp.text)} chars from {url}")
+                return doc, []  # Return doc but no child links
+            
+            if "text/html" not in content_type:
                 logger.debug("Non-HTML for %s", url)
                 return None
         except requests.RequestException as exc:
