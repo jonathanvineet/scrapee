@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
+import time
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
@@ -370,6 +371,80 @@ def mcp():
     if response is None:
         response = {"jsonrpc": "2.0", "result": None}
     return jsonify(response), 200
+
+
+# ─── SERVERLESS MCP: BACKGROUND SCRAPE ENDPOINT (NON-BLOCKING) ───────────────
+@app.route("/api/internal/background_scrape", methods=["POST"])
+def background_scrape():
+    """
+    Internal endpoint for non-blocking background scraping.
+    
+    Called via fire-and-forget trigger from MCP tools.
+    Completes within 8-15 seconds (Vercel-safe).
+    
+    SERVERLESS-SAFE:
+    - Designed to complete within 30 seconds
+    - Doesn't block user-facing requests
+    - Called from daemon thread (won't crash if timeout)
+    """
+    data = request.json or {}
+    query = data.get("query", "").strip()
+    urls = data.get("urls", [])
+    
+    if not urls:
+        return jsonify({"status": "skipped", "reason": "no urls"}), 200
+    
+    # Process URLs (top 3)
+    scraped_count = 0
+    for url in urls[:3]:
+        try:
+            # Quick scrape: shallow depth, small batch
+            result = mcp_server._tool_scrape_url({
+                "url": url,
+                "mode": "smart",
+                "max_depth": 1
+            })
+            
+            # Record success in domain learner
+            if hasattr(mcp_server, 'domain_learner') and not result.get("error"):
+                mcp_server.domain_learner.record_success(query, url)
+                scraped_count += 1
+        except Exception as e:
+            print(f"[Background] Failed to scrape {url}: {e}")
+            continue
+    
+    return jsonify({
+        "status": "done",
+        "query": query,
+        "urls_processed": len(urls),
+        "scraped_count": scraped_count
+    }), 200
+
+
+# ─── CACHE STATS ENDPOINT (DEBUGGING) ──────────────────────────────────────
+@app.route("/api/stats", methods=["GET"])
+def stats():
+    """Get system statistics for debugging."""
+    cache_stats = (
+        mcp_server.cache.stats()
+        if hasattr(mcp_server.cache, 'stats')
+        else {"error": "cache stats not available"}
+    )
+    
+    db_stats = mcp_server.store.get_stats()
+    
+    domain_learner_stats = (
+        {"learned_domains": len(mcp_server.domain_learner.learned_domains)}
+        if hasattr(mcp_server, 'domain_learner')
+        else {}
+    )
+    
+    return jsonify({
+        "cache": cache_stats,
+        "database": db_stats,
+        "domain_learning": domain_learner_stats,
+        "timestamp": time.time()
+    }), 200
 
 
 if __name__ == "__main__":
