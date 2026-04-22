@@ -75,3 +75,4 @@ test_*.db
 # Legacy
 *_legacy.*
 *.old
+/allmd
