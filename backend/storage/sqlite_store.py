@@ -120,22 +120,27 @@ class SQLiteStore:
             print(f"⚠ Failed to pull DB from Redis: {e}")
 
     def _push_to_redis(self):
-        """Upload the current SQLite database to Redis."""
+        """
+        Upload the current SQLite database to Redis.
+        
+        VERCEL-SAFE: NO THREADING
+        - Direct synchronous call
+        - Never creates background threads (they die on Vercel)
+        - Executes inline during response handling
+        - Fast enough (<500ms) for Vercel
+        """
         if not self.redis_client or self.db_path == ":memory:":
             return
-            
-        def _upload():
-            with self._sync_lock:
-                try:
-                    with open(self.db_path, "rb") as f:
-                        data = f.read()
-                    self.redis_client.set("scrapee:sqlite:db", data)
-                    print(f"✓ Pushed SQLite database to Redis ({len(data)} bytes)")
-                except Exception as e:
-                    print(f"⚠ Failed to push DB to Redis: {e}")
-                    
-        # Run in background to avoid blocking the main thread
-        threading.Thread(target=_upload, daemon=True).start()
+        
+        # SYNCHRONOUS (not threaded - threading is unsafe on Vercel)
+        with self._sync_lock:
+            try:
+                with open(self.db_path, "rb") as f:
+                    data = f.read()
+                self.redis_client.set("scrapee:sqlite:db", data, ex=86400)  # 24h TTL
+                print(f"✓ Pushed SQLite DB to Redis ({len(data)} bytes)")
+            except Exception as e:
+                print(f"⚠ Failed to push DB to Redis: {e}")
 
     def _init_schema(self):
         """Create or migrate the schema to the rowid-backed FTS layout."""

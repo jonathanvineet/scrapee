@@ -2,17 +2,27 @@
 Enhanced Smart Scraper for Production MCP
 Extracts structured content including code blocks, topics, and metadata.
 
+UNIVERSAL FORMAT SUPPORT:
+- HTML documents (docs, tutorials, blogs)
+- XML config files (pom.xml, etc.)
+- JSON configs (package.json, etc.)
+- Plain text files (README.md, etc.)
+- GitHub repos (auto blob→raw conversion)
+
 Security features:
 - URL validation (scheme + hostname)
 - Internal network / metadata endpoint blocking
 - 8-second request timeout with partial-result return
 """
 import ipaddress
+import json as _json
 import re
 import socket
 from typing import Dict, List, Optional, Tuple
+import xml.etree.ElementTree as ET
 
 import requests as _requests
+
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 
@@ -160,33 +170,297 @@ class SmartScraper:
         except Exception:
             return None
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # UNIVERSAL CONTENT TYPE DETECTION & ROUTING
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _extract_domain_from_url(self, url: str) -> str:
+        """Extract domain from URL."""
+        try:
+            parsed = urlparse(url)
+            return parsed.netloc or "unknown"
+        except:
+            return "unknown"
+
+    def _normalize_url(self, url: str) -> str:
+        """
+        Normalize URLs for universal scraping.
+        
+        GitHub blob→raw conversion:
+        - github.com/.../blob/.../file → raw.githubusercontent.com/.../file
+        - Enables direct access to raw content
+        """
+        if "github.com" in url and "/blob/" in url:
+            # Convert: https://github.com/user/repo/blob/branch/path/file
+            # To: https://raw.githubusercontent.com/user/repo/branch/path/file
+            url = url.replace("github.com", "raw.githubusercontent.com")
+            url = url.replace("/blob/", "/")
+            print(f"[Universal] Converted GitHub blob → raw: {url}")
+        return url
+
+    def _detect_content_type(self, content: str, url: str) -> str:
+        """
+        Detect content type from content or URL extension.
+        
+        Returns: "html" | "xml" | "json" | "plaintext"
+        """
+        if not content:
+            return "plaintext"
+        
+        stripped = content.strip()
+        
+        # Check JSON
+        if stripped.startswith(("{", "[")):
+            try:
+                _json.loads(stripped)
+                return "json"
+            except:
+                pass
+        
+        # Check XML
+        if stripped.startswith("<?xml") or stripped.startswith("<"):
+            try:
+                ET.fromstring(stripped[:500])  # Try to parse first 500 chars
+                return "xml"
+            except:
+                pass
+        
+        # Check HTML
+        if "<html" in stripped.lower() or "<body" in stripped.lower() or "<div" in stripped.lower():
+            return "html"
+        
+        # Check file extension
+        url_lower = url.lower()
+        if url_lower.endswith((".xml", ".pom")):
+            return "xml"
+        if url_lower.endswith((".json", ".yml", ".yaml")):
+            return "json"
+        if url_lower.endswith((".md", ".txt", ".rst")):
+            return "plaintext"
+        
+        # Default to HTML (backward compatible)
+        return "html"
+
+    def _parse_xml(self, xml_content: str, url: str) -> Dict:
+        """Parse XML/config files (pom.xml, etc.)."""
+        try:
+            root = ET.fromstring(xml_content)
+            
+            # Extract all tags and attributes
+            code_blocks = []
+            topics = []
+            content_lines = []
+            
+            def extract_elements(elem, path=""):
+                """Recursively extract XML structure."""
+                current_path = f"{path}/{elem.tag}"
+                
+                if elem.text and elem.text.strip():
+                    content_lines.append(f"{current_path}: {elem.text.strip()[:200]}")
+                
+                if elem.attrib:
+                    attr_str = " ".join(f'{k}="{v}"' for k, v in elem.attrib.items())
+                    topics.append({
+                        "topic": f"XML Attribute",
+                        "heading": current_path,
+                        "level": len(path.split("/")),
+                        "content": attr_str[:400]
+                    })
+                
+                for child in elem:
+                    extract_elements(child, current_path)
+            
+            extract_elements(root)
+            
+            # Store full XML as code block
+            code_blocks.append({
+                "snippet": xml_content[:5000],
+                "language": "xml",
+                "context": f"XML structure from {url}",
+                "line_number": 1
+            })
+            
+            return {
+                "content": "\n".join(content_lines[:500]),
+                "code_blocks": code_blocks,
+                "topics": topics,
+                "metadata": {
+                    "type": "xml",
+                    "root_tag": root.tag,
+                    "domain": self._extract_domain_from_url(url),
+                    "language": "xml"
+                }
+            }
+        except Exception as e:
+            print(f"[XML Parse] Error parsing {url}: {e}")
+            # Fallback to plaintext
+            return self._parse_plaintext(xml_content, url)
+
+    def _parse_json(self, json_content: str, url: str) -> Dict:
+        """Parse JSON config files."""
+        try:
+            data = _json.loads(json_content)
+            
+            # Extract structure
+            code_blocks = [{
+                "snippet": json_content[:5000],
+                "language": "json",
+                "context": f"JSON config from {url}",
+                "line_number": 1
+            }]
+            
+            topics = []
+            content_lines = []
+            
+            def flatten_json(obj, prefix=""):
+                """Extract JSON structure."""
+                if isinstance(obj, dict):
+                    for key, value in obj.items():
+                        full_key = f"{prefix}.{key}" if prefix else key
+                        if isinstance(value, (dict, list)):
+                            flatten_json(value, full_key)
+                        else:
+                            content_lines.append(f"{full_key}: {str(value)[:100]}")
+                            topics.append({
+                                "topic": "JSON Field",
+                                "heading": full_key,
+                                "level": len(full_key.split(".")),
+                                "content": str(value)[:400]
+                            })
+                elif isinstance(obj, list):
+                    for i, item in enumerate(obj[:5]):
+                        flatten_json(item, f"{prefix}[{i}]")
+            
+            flatten_json(data)
+            
+            return {
+                "content": "\n".join(content_lines[:500]),
+                "code_blocks": code_blocks,
+                "topics": topics,
+                "metadata": {
+                    "type": "json",
+                    "domain": self._extract_domain_from_url(url),
+                    "language": "json"
+                }
+            }
+        except Exception as e:
+            print(f"[JSON Parse] Error parsing {url}: {e}")
+            return self._parse_plaintext(json_content, url)
+
+    def _parse_plaintext(self, text_content: str, url: str) -> Dict:
+        """Parse plain text files (README.md, docs, etc.)."""
+        lines = text_content.split("\n")
+        
+        # Extract headings as topics
+        topics = []
+        code_blocks = []
+        
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            
+            # Markdown/restructured headings
+            if stripped.startswith("#"):
+                level = len(stripped) - len(stripped.lstrip("#"))
+                content = stripped.lstrip("# ").strip()
+                topics.append({
+                    "topic": "Heading",
+                    "heading": content,
+                    "level": level,
+                    "content": content[:400]
+                })
+            
+            # Code blocks marked with backticks
+            if "```" in line:
+                # Try to extract code block context
+                code_start = i
+                code_block = []
+                for j in range(i+1, min(i+50, len(lines))):
+                    if "```" in lines[j]:
+                        break
+                    code_block.append(lines[j])
+                
+                if code_block:
+                    code_blocks.append({
+                        "snippet": "\n".join(code_block)[:5000],
+                        "language": "plaintext",
+                        "context": f"Code block at line {code_start}",
+                        "line_number": code_start
+                    })
+        
+        # Store full text
+        if len(text_content) > 100:
+            code_blocks.insert(0, {
+                "snippet": text_content[:5000],
+                "language": "plaintext",
+                "context": f"Full document from {url}",
+                "line_number": 1
+            })
+        
+        return {
+            "content": text_content[:10000],
+            "code_blocks": code_blocks,
+            "topics": topics,
+            "metadata": {
+                "type": "plaintext",
+                "domain": self._extract_domain_from_url(url),
+                "language": "plaintext",
+                "line_count": len(lines)
+            }
+        }
+
     def parse_html(self, html: str, url: str) -> Dict:
         """
-        Parse HTML and extract structured content.
-
+        UNIVERSAL PARSER — routes to appropriate format handler.
+        
+        AUTO-DETECTS:
+        - HTML documents → HTML parser (existing)
+        - XML configs → XML parser
+        - JSON configs → JSON parser
+        - Plain text → Text parser
+        
+        Also NORMALIZES URLs:
+        - GitHub blob → raw.githubusercontent
+        - Other conversions as needed
+        
         Args:
-            html: HTML content string
-            url:  Source URL (used for metadata and domain extraction)
-
+            html: Content string (misleading name for universal parser)
+            url:  Source URL
+        
         Returns:
             Dict with keys: content, code_blocks, topics, metadata
         """
-        soup = BeautifulSoup(html or "", "html.parser")
+        # Step 1: Normalize URL (GitHub blob → raw)
+        url = self._normalize_url(url)
+        
+        # Step 2: Detect content type
+        content_type = self._detect_content_type(html, url)
+        print(f"[Universal] Detected {content_type} from {url}")
+        
+        # Step 3: Route to appropriate parser
+        if content_type == "xml":
+            return self._parse_xml(html, url)
+        elif content_type == "json":
+            return self._parse_json(html, url)
+        elif content_type == "plaintext":
+            return self._parse_plaintext(html, url)
+        else:
+            # Default to HTML parser (existing logic)
+            soup = BeautifulSoup(html or "", "html.parser")
 
-        # Strip navigation chrome
-        for element in soup(["script", "style", "nav", "footer", "header", "iframe"]):
-            element.decompose()
+            # Strip navigation chrome
+            for element in soup(["script", "style", "nav", "footer", "header", "iframe"]):
+                element.decompose()
 
-        metadata = self._extract_metadata(soup, url)
-        code_blocks = self._extract_code_blocks(soup, url)
-        topics = self._extract_topics(soup)
-        content = self._extract_text(soup)
+            metadata = self._extract_metadata(soup, url)
+            code_blocks = self._extract_code_blocks(soup, url)
+            topics = self._extract_topics(soup)
+            content = self._extract_text(soup)
 
-        return {
-            "content": content,
-            "code_blocks": code_blocks,
-            "topics": topics,
-            "metadata": metadata,
+            return {
+                "content": content,
+                "code_blocks": code_blocks,
+                "topics": topics,
+                "metadata": metadata,
         }
 
     def _extract_github_readme(self, url: str, timeout: int = FETCH_TIMEOUT_SECONDS) -> Optional[str]:
