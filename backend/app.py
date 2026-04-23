@@ -382,54 +382,71 @@ def background_scrape():
     Called via fire-and-forget HTTP POST from MCP tools.
     Completes within 8 seconds (Vercel-safe with buffer).
     
-    VERCEL-SAFE:
+    PRODUCTION FEATURES:
+    - Tracks scrape job status (RUNNING → COMPLETED)
+    - Prevents duplicate scrapes
     - Limits to 2 URLs (prevents long execution)
     - Hard 8-second timeout guard
-    - Doesn't block user-facing requests
-    - Uses direct HTTP (not threading)
+    - Non-blocking (doesn't block user requests)
     """
     data = request.json or {}
     query = data.get("query", "").strip()
     urls = data.get("urls", [])
     
-    if not urls:
-        return jsonify({"status": "skipped", "reason": "no urls"}), 200
+    if not query or not urls:
+        return jsonify({"status": "skipped", "reason": "missing query or urls"}), 200
     
     # HARD LIMIT: 8-second timeout guard
     start_time = time.time()
     max_duration = 8  # Vercel safety margin
     
-    # Process URLs (top 2 ONLY, not 5)
-    scraped_count = 0
-    for url in urls[:2]:  # CRITICAL: Limited to 2 URLs
-        # Check timeout before each URL
-        elapsed = time.time() - start_time
-        if elapsed > max_duration:
-            print(f"[Background] Timeout: stopping after {elapsed:.1f}s")
-            break
-        
-        try:
-            # Quick scrape: shallow depth, small batch
-            result = mcp_server._tool_scrape_url({
-                "url": url,
-                "mode": "smart",
-                "max_depth": 1
-            })
+    try:
+        # Process URLs (top 2 ONLY)
+        scraped_count = 0
+        for url in urls[:2]:  # CRITICAL: Limited to 2 URLs
+            # Check timeout before each URL
+            elapsed = time.time() - start_time
+            if elapsed > max_duration:
+                print(f"[Background] Timeout: stopping after {elapsed:.1f}s")
+                break
             
-            # Record success in domain learner
-            if hasattr(mcp_server, 'domain_learner') and not result.get("error"):
-                mcp_server.domain_learner.record_success(query, url)
-                scraped_count += 1
+            try:
+                # Quick scrape: shallow depth, small batch
+                result = mcp_server._tool_scrape_url({
+                    "url": url,
+                    "mode": "smart",
+                    "max_depth": 1
+                })
+                
+                # Record success in domain learner
+                if hasattr(mcp_server, 'domain_learner') and not result.get("error"):
+                    mcp_server.domain_learner.record_success(query, url)
+                    scraped_count += 1
+            except Exception as e:
+                print(f"[Background] Failed to scrape {url}: {e}")
+                continue
+        
+        # Mark scrape job as COMPLETED
+        try:
+            mcp_server.store.upsert_scrape_job(query, "completed")
+            print(f"[Background] Marked job as COMPLETED: {query} ({scraped_count} docs)")
         except Exception as e:
-            print(f"[Background] Failed to scrape {url}: {e}")
-            continue
-    
-    return jsonify({
-        "status": "done",
-        "query": query,
-        "urls_processed": len(urls),
-        "scraped_count": scraped_count
-    }), 200
+            print(f"[Background] Failed to mark job COMPLETED: {e}")
+        
+        return jsonify({
+            "status": "done",
+            "query": query,
+            "urls_processed": len(urls),
+            "scraped_count": scraped_count
+        }), 200
+    except Exception as e:
+        print(f"[Background] Error in background_scrape: {e}")
+        # Mark as FAILED so it can be retried
+        try:
+            mcp_server.store.upsert_scrape_job(query, "failed")
+        except:
+            pass
+        return jsonify({"status": "error", "error": str(e)}), 500
 
 
 # ─── CACHE STATS ENDPOINT (DEBUGGING) ──────────────────────────────────────

@@ -115,30 +115,62 @@ class DomainLearner:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 2B. SCRAPE DECISION LOGIC
+# ─────────────────────────────────────────────────────────────────────────────
+
+def should_scrape_query(store, query: str) -> bool:
+    """
+    Decide whether to scrape for a query.
+    
+    Returns False if:
+    - Scrape already completed
+    - Scrape is currently running
+    
+    Returns True if:
+    - First time seeing this query
+    - Previous scrape failed
+    """
+    try:
+        job = store.get_scrape_job(query)
+        
+        if not job:
+            return True  # New query, should scrape
+        
+        status = job.get("status", "").lower()
+        
+        if status == "completed":
+            return False  # Already scraped
+        
+        if status == "running":
+            return False  # Currently scraping, don't duplicate
+        
+        return True  # Failed or unknown, retry
+    except Exception as e:
+        print(f"[Scrape Decision] Error: {e}")
+        return True  # Default to scraping on error
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 3. NON-BLOCKING BACKGROUND SCRAPE TRIGGER
 # ─────────────────────────────────────────────────────────────────────────────
 
-def trigger_background_scrape(query: str, urls: Optional[List[str]] = None) -> bool:
+def trigger_background_scrape(query: str, urls: Optional[List[str]] = None, store=None) -> bool:
     """
-    Fire-and-forget background scrape trigger.
+    Fire-and-forget background scrape trigger with retry.
     
     VERCEL-SAFE:
     - Uses direct HTTP POST (not threading)
-    - Fire-and-forget pattern
-    - Doesn't wait for response
-    - Short timeout (1s) to prevent blocking
-    
-    WHY NOT THREADING:
-    - Serverless functions terminate after response
-    - Threads may not execute or get killed
-    - Direct HTTP POST is reliable on Vercel
+    - Fire-and-forget pattern (doesn't wait)
+    - 1-second timeout to prevent blocking
+    - Retry once if fails
     
     Args:
         query: User query (for logging)
-        urls: List of URLs to scrape (top 2 used)
+        urls: List of URLs to scrape (limited to 2)
+        store: SQLiteStore for marking job as RUNNING
     
     Returns:
-        True if trigger succeeded, False if failed
+        True if trigger succeeded, False if both retries failed
     """
     try:
         base_url = os.getenv("BASE_URL")
@@ -146,28 +178,44 @@ def trigger_background_scrape(query: str, urls: Optional[List[str]] = None) -> b
             print(f"[Background] BASE_URL not set, skipping")
             return False
         
-        # Call internal background scrape endpoint
-        endpoint = f"{base_url}/api/internal/background_scrape"
-        payload = {
-            "query": query,
-            "urls": urls[:2] if urls else []  # LIMIT: Only 2 URLs
-        }
+        # Mark scrape job as RUNNING (prevents duplicate scrapes)
+        if store:
+            try:
+                store.upsert_scrape_job(query, "running")
+            except Exception as e:
+                print(f"[Background] Failed to mark job RUNNING: {e}")
         
-        # Fire and forget: Very short timeout to prevent blocking
-        # This starts the request but doesn't wait for completion
-        try:
-            requests.post(
-                endpoint,
-                json=payload,
-                timeout=1  # CRITICAL: 1s timeout (fire-and-forget)
-            )
-        except requests.exceptions.Timeout:
-            # Timeout is expected and OK (we didn't wait anyway)
-            pass
+        # Retry loop: try twice
+        for attempt in range(2):
+            try:
+                endpoint = f"{base_url}/api/internal/background_scrape"
+                payload = {
+                    "query": query,
+                    "urls": urls[:2] if urls else []  # LIMIT: Only 2 URLs
+                }
+                
+                # Fire and forget: 1s timeout
+                requests.post(
+                    endpoint,
+                    json=payload,
+                    timeout=1
+                )
+                print(f"[Background] Scrape triggered for: {query}")
+                return True
+            except requests.exceptions.Timeout:
+                # Timeout is expected (we fire-and-forget)
+                print(f"[Background] Timeout on attempt {attempt+1}/2 (expected for fire-and-forget)")
+                if attempt == 1:
+                    return False
+                continue
+            except Exception as e:
+                print(f"[Background] Attempt {attempt+1}/2 failed: {e}")
+                if attempt == 1:
+                    return False
+                continue
         
-        return True
+        return False
     except Exception as e:
-        # Silently fail (don't block user)
         print(f"[Background] Scrape trigger failed: {e}")
         return False
 
@@ -323,6 +371,64 @@ def generate_sources_for_query(query: str, domain_hints: Dict[str, str]) -> List
             sources.append(domain_url)
     
     return sources[:3]  # Return top 3
+
+
+def rank_sources_by_relevance(urls: List[str], query: str = "") -> List[str]:
+    """
+    Rank sources by relevance/reliability.
+    
+    Scoring heuristic:
+    - Official docs sites score higher
+    - ReadTheDocs scores high
+    - GitHub scores medium (source code)
+    - Generic sites score lower
+    """
+    scored = []
+    
+    for url in urls:
+        score = 0
+        url_lower = url.lower()
+        
+        # Official documentation sites (highest priority)
+        if any(domain in url_lower for domain in [
+            "docs.",
+            "/docs",
+            "/documentation",
+            "official",
+            ".io/docs"
+        ]):
+            score += 10
+        
+        # ReadTheDocs (very reliable)
+        if "readthedocs" in url_lower:
+            score += 8
+        
+        # Framework official sites
+        if any(domain in url_lower for domain in [
+            "python.org",
+            "nodejs.org",
+            "ruby-lang.org",
+            "golang.org",
+            "rust-lang.org"
+        ]):
+            score += 9
+        
+        # GitHub (source code, but ranked lower than official docs)
+        if "github.com" in url_lower:
+            score += 3
+        
+        # Stack Overflow (example code)
+        if "stackoverflow.com" in url_lower:
+            score += 2
+        
+        # Generic sites
+        if score == 0:
+            score = 1
+        
+        scored.append((score, url))
+    
+    # Sort by score descending, return URLs
+    return [url for score, url in sorted(scored, key=lambda x: x[0], reverse=True)]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

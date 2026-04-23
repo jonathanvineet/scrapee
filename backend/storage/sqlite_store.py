@@ -190,6 +190,15 @@ class SQLiteStore:
             CREATE INDEX IF NOT EXISTS idx_code_doc_id ON code_blocks(doc_id);
             CREATE INDEX IF NOT EXISTS idx_code_language ON code_blocks(language);
             CREATE INDEX IF NOT EXISTS idx_topics_doc_id ON doc_topics(doc_id);
+
+            CREATE TABLE IF NOT EXISTS scrape_jobs (
+                query TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_scrape_jobs_status ON scrape_jobs(status);
             """
         )
         self.conn.commit()
@@ -865,6 +874,50 @@ class SQLiteStore:
             """
         )
         return [dict(row) for row in cursor.fetchall()]
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # SCRAPE JOB TRACKING (NEW)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def get_scrape_job(self, query: str) -> Optional[Dict]:
+        """Get scrape job status for a query."""
+        cursor = self.conn.cursor()
+        row = cursor.execute(
+            "SELECT query, status, updated_at, created_at FROM scrape_jobs WHERE query = ?",
+            (query,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def upsert_scrape_job(self, query: str, status: str) -> None:
+        """Create or update a scrape job (RUNNING, COMPLETED, or FAILED)."""
+        from datetime import datetime
+        cursor = self.conn.cursor()
+        now = datetime.utcnow().isoformat()
+        
+        cursor.execute(
+            """
+            INSERT INTO scrape_jobs (query, status, updated_at, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(query) DO UPDATE SET
+                status = excluded.status,
+                updated_at = excluded.updated_at
+            """,
+            (query, status, now, now)
+        )
+        self.conn.commit()
+
+    def clear_stale_scrape_jobs(self, older_than_hours: int = 24) -> int:
+        """Clear scrape jobs older than N hours."""
+        from datetime import datetime, timedelta
+        cursor = self.conn.cursor()
+        cutoff = (datetime.utcnow() - timedelta(hours=older_than_hours)).isoformat()
+        
+        cursor.execute(
+            "DELETE FROM scrape_jobs WHERE updated_at < ?",
+            (cutoff,)
+        )
+        self.conn.commit()
+        return cursor.rowcount
     
     def get_stats(self) -> Dict:
         """

@@ -32,11 +32,13 @@ from serverless_mcp_upgrade import (
     ThreadSafeCacheLayer,
     DomainLearner,
     trigger_background_scrape,
+    should_scrape_query,
     ServerlessTimeoutGuard,
     configure_session_for_serverless,
     NonBlockingSearchResponse,
     SERVERLESS_CRAWLER_CONFIG,
     generate_sources_for_query,
+    rank_sources_by_relevance,
 )
 
 
@@ -1461,70 +1463,82 @@ class MCPServer:
     # ------------------------------------------------------------------ #
 
     def _tool_answer(self, args: Dict) -> Dict:
-        """🚀 SERVERLESS: Master tool — instant responses with background learning.
+        """🚀 PRODUCTION MCP: Instant responses + intelligent background learning.
 
-        PATTERN:
+        VERCEL-SAFE PATTERN:
           1. Search the index (instant, <10ms)
-          2. If empty → trigger background scrape (fire-and-forget)
-          3. Return learning status (user sees instant feedback)
-          4. Next query will have data
-
-        NO BLOCKING — user always gets response <300ms
+          2. If found → return "ready" with results
+          3. If empty → check scrape_jobs table
+          4. If not running/completed → HTTP POST to /api/internal/background_scrape
+          5. Return "learning" status instantly (<300ms)
+          6. Background: New serverless invocation scrapes and stores data
+          7. Next query finds results immediately
         """
         query = args.get("query")
         if not query:
-            return {"error": "query required"}
+            return {"status": "error", "message": "query required"}
 
-        # ─ FAST PATH: Check cache first (instant) ─
+        # ─ STEP 1: Check cache ─
         cache_key = f"answer:{query}"
         cached = self.cache.get(cache_key)
         if cached:
-            cached["from_cache"] = True
             return cached
 
-        # ─ Search index (no blocking) ─
-        results = self.store.search_and_get(query, limit=5)
+        # ─ STEP 2: Search index ─
+        try:
+            results = self.store.search_and_get(query, limit=5)
+        except Exception as e:
+            print(f"[Search Error] {e}")
+            results = []
 
-        # ─ Level 2 Semantic search merge (if available) ─
+        # ─ STEP 3: Merge semantic search (optional) ─
         if self.vector_store and results:
-            vec_results = self.vector_store.semantic_search(query, limit=3)
-            seen_urls = {r.get("url") for r in results}
-            for vr in vec_results:
-                if vr.get("url") not in seen_urls:
-                    results.append(vr)
-                    seen_urls.add(vr.get("url"))
+            try:
+                vec_results = self.vector_store.semantic_search(query, limit=3)
+                seen_urls = {r.get("url") for r in results}
+                for vr in vec_results:
+                    if vr.get("url") not in seen_urls:
+                        results.append(vr)
+            except Exception:
+                pass
 
-        # ─ IF RESULTS: Return instantly ─
+        # ─ STEP 4: If found, return "ready" ─
         if results:
             boosted = self._boost_results(results)
             response = {
-                "query": query,
-                "results": boosted[:8],
-                "count": min(len(boosted), 8),
                 "status": "ready",
+                "results": boosted[:8],
                 "response_time_ms": "<100ms"
             }
-            self.cache.set(cache_key, response)
+            self.cache.set(cache_key, response, ttl=300)
             return response
 
-        # ─ IF EMPTY: Trigger background scrape (fire-and-forget) ─
-        # Don't block — return instantly
-        sources = generate_sources_for_query(query, self.DOMAIN_HINTS)
-        scrape_triggered = False
+        # ─ STEP 5: Check scrape job status ─
+        job = self.store.get_scrape_job(query)
+        should_trigger = should_scrape_query(self.store, query)
 
-        if sources:
-            # Fire-and-forget: trigger background scrape
-            scrape_triggered = trigger_background_scrape(query, sources)
+        if should_trigger:
+            # Generate + rank sources
+            sources = generate_sources_for_query(query, self.DOMAIN_HINTS)
+            if not sources:
+                try:
+                    sources = self._detect_best_domains(query)
+                except Exception:
+                    sources = []
+            
+            if sources:
+                sources = rank_sources_by_relevance(sources, query)
+                # CRITICAL: HTTP POST, not threading
+                trigger_background_scrape(query, sources, store=self.store)
 
-        # Return learning status (user sees "fetching...") 
-        response = NonBlockingSearchResponse.answer(
-            query,
-            results=None,
-            has_triggered_scrape=scrape_triggered
-        )
-        
-        # Cache for 30s (next request will probably have data)
-        self.cache.set(cache_key, response)
+        # ─ STEP 6: Return "learning" status instantly ─
+        response = {
+            "status": "learning",
+            "message": "Fetching live documentation...",
+            "results": [],
+            "response_time_ms": "<300ms"
+        }
+        self.cache.set(cache_key, response, ttl=10)
         return response
 
     def _tool_understand_repo(self, args: Dict) -> Dict:
