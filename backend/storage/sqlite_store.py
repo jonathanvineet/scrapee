@@ -292,6 +292,11 @@ class SQLiteStore:
         """
         Save document with structured data.
         
+        REDIS PERSISTENCE:
+        - Saves to SQLite for fast local search
+        - Also saves to Redis (24h TTL) for persistence across Vercel cold starts
+        - Next query retrieves from Redis if available
+        
         Args:
             url: Document URL
             content: Full text content
@@ -422,6 +427,27 @@ class SQLiteStore:
                 except Exception as e:
                     print(f"[VEC] Error indexing doc {doc_id}: {e}")
             
+            # 📦 REDIS CACHE: Store doc in Redis for fast retrieval across cold starts
+            try:
+                doc_cache = {
+                    "id": doc_id,
+                    "url": url,
+                    "title": title,
+                    "content": content,
+                    "domain": domain,
+                    "language": language,
+                    "scraped_at": scraped_at,
+                    "metadata": metadata
+                }
+                if self.redis_client:
+                    self.redis_client.set(
+                        f"doc:{url}",
+                        json.dumps(doc_cache),
+                        ex=86400  # 24-hour TTL
+                    )
+            except Exception as e:
+                print(f"⚠ Failed to cache doc in Redis: {e}")
+            
             # Persist to Redis
             self._push_to_redis()
             return True
@@ -435,9 +461,28 @@ class SQLiteStore:
         """
         Retrieve document by URL.
         
+        REDIS READ-THROUGH:
+        - Checks Redis first (fast, survives cold starts)
+        - Falls back to SQLite if not in Redis
+        - Re-caches in Redis on SQLite hit
+        
         Returns:
             Dict with url, title, content, metadata or None
         """
+        # ✅ REDIS READ-THROUGH: Check Redis first
+        if self.redis_client:
+            try:
+                cached = self.redis_client.get(f"doc:{url}")
+                if cached:
+                    doc_data = json.loads(cached)
+                    # Fetch related data from SQLite (topics, code blocks)
+                    doc_data["topics"] = self.get_topics_by_url(url)
+                    doc_data["code_blocks"] = self.get_code_blocks_by_url(url)
+                    return doc_data
+            except Exception as e:
+                print(f"⚠ Redis read-through error: {e}")
+        
+        # 📚 Fallback to SQLite
         cursor = self.conn.cursor()
         cursor.execute("""
             SELECT id, url, title, content, domain, language, scraped_at, metadata
@@ -460,6 +505,27 @@ class SQLiteStore:
         }
         doc["topics"] = self.get_topics_by_url(url)
         doc["code_blocks"] = self.get_code_blocks_by_url(url)
+        
+        # 📦 RE-CACHE in Redis for next cold start
+        try:
+            if self.redis_client:
+                self.redis_client.set(
+                    f"doc:{url}",
+                    json.dumps({
+                        "id": doc["id"],
+                        "url": doc["url"],
+                        "title": doc["title"],
+                        "content": doc["content"],
+                        "domain": doc["domain"],
+                        "language": doc["language"],
+                        "scraped_at": doc["scraped_at"],
+                        "metadata": doc["metadata"]
+                    }),
+                    ex=86400  # 24-hour TTL
+                )
+        except Exception as e:
+            print(f"⚠ Failed to re-cache doc in Redis: {e}")
+        
         return doc
     
     def list_docs(self, limit: Optional[int] = None) -> List[str]:

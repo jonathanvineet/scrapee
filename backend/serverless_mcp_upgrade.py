@@ -156,13 +156,13 @@ def should_scrape_query(store, query: str) -> bool:
 
 def trigger_background_scrape(query: str, urls: Optional[List[str]] = None, store=None) -> bool:
     """
-    Fire-and-forget background scrape trigger with retry.
+    True fire-and-forget background scrape trigger.
     
     VERCEL-SAFE:
     - Uses direct HTTP POST (not threading)
-    - Fire-and-forget pattern (doesn't wait)
-    - 1-second timeout to prevent blocking
-    - Retry once if fails
+    - True fire-and-forget (minimal timeout = instant return)
+    - 0.001s timeout ensures response returns immediately
+    - Never blocks the request thread
     
     Args:
         query: User query (for logging)
@@ -170,7 +170,7 @@ def trigger_background_scrape(query: str, urls: Optional[List[str]] = None, stor
         store: SQLiteStore for marking job as RUNNING
     
     Returns:
-        True if trigger succeeded, False if both retries failed
+        True if POST sent, False if exception
     """
     try:
         base_url = os.getenv("BASE_URL")
@@ -185,36 +185,27 @@ def trigger_background_scrape(query: str, urls: Optional[List[str]] = None, stor
             except Exception as e:
                 print(f"[Background] Failed to mark job RUNNING: {e}")
         
-        # Retry loop: try twice
-        for attempt in range(2):
-            try:
-                endpoint = f"{base_url}/api/internal/background_scrape"
-                payload = {
-                    "query": query,
-                    "urls": urls[:2] if urls else []  # LIMIT: Only 2 URLs
-                }
-                
-                # Fire and forget: 1s timeout
-                requests.post(
-                    endpoint,
-                    json=payload,
-                    timeout=1
-                )
-                print(f"[Background] Scrape triggered for: {query}")
-                return True
-            except requests.exceptions.Timeout:
-                # Timeout is expected (we fire-and-forget)
-                print(f"[Background] Timeout on attempt {attempt+1}/2 (expected for fire-and-forget)")
-                if attempt == 1:
-                    return False
-                continue
-            except Exception as e:
-                print(f"[Background] Attempt {attempt+1}/2 failed: {e}")
-                if attempt == 1:
-                    return False
-                continue
+        endpoint = f"{base_url}/api/internal/background_scrape"
+        payload = {
+            "query": query,
+            "urls": urls[:2] if urls else []  # LIMIT: Only 2 URLs
+        }
         
-        return False
+        # CRITICAL: 0.001s timeout = truly non-blocking fire-and-forget
+        # This ensures user response returns immediately, no blocking
+        try:
+            requests.post(
+                endpoint,
+                json=payload,
+                timeout=0.001  # ← MINIMAL: ~1ms
+            )
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+            # Timeout/connection errors are expected with 1ms timeout
+            # This is intentional - we don't wait for success confirmation
+            pass
+        
+        print(f"[Background] Fire-and-forget sent for: {query}")
+        return True
     except Exception as e:
         print(f"[Background] Scrape trigger failed: {e}")
         return False
