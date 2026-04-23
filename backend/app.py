@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import os
 import time
+import requests
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
@@ -377,71 +378,100 @@ def mcp():
 @app.route("/api/internal/background_scrape", methods=["POST"])
 def background_scrape():
     """
-    Internal endpoint for non-blocking background scraping.
+    VERCEL-OPTIMIZED: Process ONE URL per invocation, chain remaining.
     
     Called via fire-and-forget HTTP POST from MCP tools.
-    Completes within 8 seconds (Vercel-safe with buffer).
+    
+    CRITICAL PATTERN:
+    1. Process ONLY first URL in this invocation
+    2. If more URLs remain → POST next invocation immediately
+    3. Each invocation runs independently (Vercel-safe)
+    4. Total time: ~2-3s per URL (well under 10s limit)
     
     PRODUCTION FEATURES:
     - Tracks scrape job status (RUNNING → COMPLETED)
-    - Prevents duplicate scrapes
-    - Limits to 2 URLs (prevents long execution)
+    - One URL per invocation (Vercel safety)
+    - Recursive chaining (auto-triggers next batch)
     - Hard 8-second timeout guard
-    - Non-blocking (doesn't block user requests)
+    - Non-blocking fire-and-forget
     """
     data = request.json or {}
     query = data.get("query", "").strip()
     urls = data.get("urls", [])
+    remaining = data.get("remaining", [])
     
-    if not query or not urls:
+    # Combine URLs + remaining
+    all_urls = (urls or []) + (remaining or [])
+    
+    if not query or not all_urls:
         return jsonify({"status": "skipped", "reason": "missing query or urls"}), 200
     
-    # HARD LIMIT: 8-second timeout guard
+    # SINGLE URL PROCESSING (one per invocation)
+    url_to_process = all_urls[0]
+    remaining_urls = all_urls[1:]
+    
     start_time = time.time()
-    max_duration = 8  # Vercel safety margin
+    max_duration = 8  # Hard timeout
     
     try:
-        # Process URLs (top 2 ONLY)
-        scraped_count = 0
-        for url in urls[:2]:  # CRITICAL: Limited to 2 URLs
-            # Check timeout before each URL
-            elapsed = time.time() - start_time
-            if elapsed > max_duration:
-                print(f"[Background] Timeout: stopping after {elapsed:.1f}s")
-                break
-            
-            try:
-                # Quick scrape: shallow depth, small batch
-                result = mcp_server._tool_scrape_url({
-                    "url": url,
-                    "mode": "smart",
-                    "max_depth": 1
-                })
-                
-                # Record success in domain learner
-                if hasattr(mcp_server, 'domain_learner') and not result.get("error"):
-                    mcp_server.domain_learner.record_success(query, url)
-                    scraped_count += 1
-            except Exception as e:
-                print(f"[Background] Failed to scrape {url}: {e}")
-                continue
+        print(f"[Background] Processing URL 1/{len(all_urls)}: {url_to_process}")
         
-        # Mark scrape job as COMPLETED
+        # Scrape SINGLE URL only
         try:
-            mcp_server.store.upsert_scrape_job(query, "completed")
-            print(f"[Background] Marked job as COMPLETED: {query} ({scraped_count} docs)")
+            result = mcp_server._tool_scrape_url({
+                "url": url_to_process,
+                "mode": "smart",
+                "max_depth": 1  # Shallow crawl
+            })
+            
+            # Record success in domain learner
+            if hasattr(mcp_server, 'domain_learner') and not result.get("error"):
+                mcp_server.domain_learner.record_success(query, url_to_process)
+                print(f"[Background] ✅ Scraped: {url_to_process}")
+            else:
+                print(f"[Background] ⚠️  Scrape returned error: {url_to_process}")
+                
         except Exception as e:
-            print(f"[Background] Failed to mark job COMPLETED: {e}")
+            print(f"[Background] ❌ Failed to scrape {url_to_process}: {e}")
+        
+        # ─ CHAIN: Trigger next URL (if exists) ─
+        if remaining_urls:
+            elapsed = time.time() - start_time
+            if elapsed < max_duration - 1:  # Leave 1s buffer
+                try:
+                    base_url = os.getenv("BASE_URL")
+                    next_payload = {
+                        "query": query,
+                        "urls": remaining_urls
+                    }
+                    
+                    # Fire-and-forget with minimal timeout
+                    requests.post(
+                        f"{base_url}/api/internal/background_scrape",
+                        json=next_payload,
+                        timeout=0.001  # Ultra-minimal (don't wait)
+                    )
+                    print(f"[Background] 🔗 Chained next batch ({len(remaining_urls)} URLs remaining)")
+                except Exception as e:
+                    print(f"[Background] ⚠️  Failed to chain next URLs: {e}")
+        else:
+            # All URLs processed - mark COMPLETED
+            try:
+                mcp_server.store.upsert_scrape_job(query, "completed")
+                print(f"[Background] ✅ Job COMPLETED: {query}")
+            except Exception as e:
+                print(f"[Background] ⚠️  Failed to mark job COMPLETED: {e}")
         
         return jsonify({
             "status": "done",
             "query": query,
-            "urls_processed": len(urls),
-            "scraped_count": scraped_count
+            "url_processed": url_to_process,
+            "remaining_count": len(remaining_urls),
+            "elapsed_ms": int((time.time() - start_time) * 1000)
         }), 200
+        
     except Exception as e:
-        print(f"[Background] Error in background_scrape: {e}")
-        # Mark as FAILED so it can be retried
+        print(f"[Background] ❌ Error in background_scrape: {e}")
         try:
             mcp_server.store.upsert_scrape_job(query, "failed")
         except:

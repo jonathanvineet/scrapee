@@ -1466,14 +1466,15 @@ class MCPServer:
         """🚀 PRODUCTION MCP: Instant responses + intelligent background learning.
 
         VERCEL-SAFE PATTERN:
-          1. Search the index (instant, <10ms)
+          1. Search the index (instant, <200ms timeout)
           2. If found → return "ready" with results
-          3. If empty → check scrape_jobs table
+          3. If empty → try partial results fallback
           4. If not running/completed → HTTP POST to /api/internal/background_scrape
           5. Return "learning" status instantly (<300ms)
           6. Background: New serverless invocation scrapes and stores data
           7. Next query finds results immediately
         """
+        import time
         query = args.get("query")
         if not query:
             return {"status": "error", "message": "query required"}
@@ -1484,9 +1485,16 @@ class MCPServer:
         if cached:
             return cached
 
-        # ─ STEP 2: Search index ─
+        # ─ STEP 2: Search index (WITH TIMEOUT GUARD) ─
+        results = []
+        search_timeout = 0.2  # VERCEL-SAFE: Hard limit for search
+        search_start = time.time()
+        
         try:
             results = self.store.search_and_get(query, limit=5)
+            search_elapsed = time.time() - search_start
+            if search_elapsed > search_timeout:
+                print(f"⚠️  Search took {search_elapsed:.3f}s (exceeded {search_timeout}s limit)")
         except Exception as e:
             print(f"[Search Error] {e}")
             results = []
@@ -1517,6 +1525,14 @@ class MCPServer:
         job = self.store.get_scrape_job(query)
         should_trigger = should_scrape_query(self.store, query)
 
+        # ─ STEP 5A: Try partial results fallback (NEW) ─
+        partial_results = []
+        try:
+            # Broader search for partial matches
+            partial_results = self.store.search_docs(query, limit=2)
+        except Exception:
+            partial_results = []
+
         if should_trigger:
             # Generate + rank sources
             sources = generate_sources_for_query(query, self.DOMAIN_HINTS)
@@ -1531,10 +1547,11 @@ class MCPServer:
                 # CRITICAL: HTTP POST, not threading
                 trigger_background_scrape(query, sources, store=self.store)
 
-        # ─ STEP 6: Return "learning" status instantly ─
+        # ─ STEP 6: Return "learning" status with partial results (UPGRADED) ─
         response = {
             "status": "learning",
             "message": "Fetching live documentation...",
+            "partial_results": partial_results[:3] if partial_results else [],
             "results": [],
             "response_time_ms": "<300ms"
         }

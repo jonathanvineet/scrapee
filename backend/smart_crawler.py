@@ -220,11 +220,30 @@ class SmartCrawler:
         max_depth: int = 3,
     ) -> list[ScrapedDocument]:
         """
+        VERCEL-OPTIMIZED: Crawl with hard limits.
+        
         Crawl starting from `seed_url`.
-
-        Returns a list of ScrapedDocument, sorted by URL score descending
-        (highest quality first).
+        
+        HARD LIMITS (production/serverless):
+        - MAX_PAGES: Enforced at 5 (was 30)
+        - MAX_DEPTH: Enforced at 1 (was 3)
+        - TIME_LIMIT: 8 seconds hard timeout
+        
+        Returns a list of ScrapedDocument, sorted by URL score descending.
         """
+        import time as time_module
+        
+        # HARD LIMITS FOR SERVERLESS
+        MAX_PAGES_HARD = 5     # Reduced from 30 (Vercel safety)
+        MAX_DEPTH_HARD = 1     # Reduced from 3 (shallow crawl)
+        TIME_LIMIT = 8         # 8 second hard timeout
+        
+        # Override parameters with hard limits
+        max_pages = min(max_pages, MAX_PAGES_HARD)
+        max_depth = min(max_depth, MAX_DEPTH_HARD)
+        
+        start_time = time_module.time()
+        
         intel = URLIntelligence(seed_url)
         visited: set[str] = set()
         domain_counts: dict[str, int] = {}
@@ -235,10 +254,16 @@ class SmartCrawler:
         seed_score = intel.score(seed_url)
         heapq.heappush(heap, _QueueEntry(-seed_score, 0, seed_url))
 
-        logger.info("SmartCrawler starting: seed=%s max_pages=%d max_depth=%d",
-                    seed_url, max_pages, max_depth)
+        logger.info("SmartCrawler starting (VERCEL-SAFE): seed=%s max_pages=%d max_depth=%d time_limit=%ds",
+                    seed_url, max_pages, max_depth, TIME_LIMIT)
 
         while heap and len(results) < max_pages:
+            # ─ HARD TIMEOUT CHECK ─
+            elapsed = time_module.time() - start_time
+            if elapsed > TIME_LIMIT:
+                logger.warning(f"[Crawler] TIME LIMIT EXCEEDED: {elapsed:.1f}s > {TIME_LIMIT}s, stopping")
+                break
+            
             entry = heapq.heappop(heap)
             url = entry.url
             depth = entry.depth
