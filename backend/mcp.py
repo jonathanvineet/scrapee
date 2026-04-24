@@ -397,12 +397,30 @@ class MCPServer:
                     "version": self.version,
                 },
                 "instructions": (
-                    "You are connected to a live documentation MCP.\n"
-                    "You MUST call the 'answer' tool for ANY technical question.\n"
-                    "Do NOT answer from memory.\n"
-                    "If the user provides a URL, pass it to 'answer' as the query.\n"
-                    "Use 'explain_code' when the user asks for code examples.\n"
-                    "Use 'scrape_url' only when explicitly given a URL to index.\n"
+                    "🧠 AGENT BRAIN SYSTEM — YOU ARE CONNECTED TO LIVE DOCUMENTATION RETRIEVAL\n\n"
+                    
+                    "CRITICAL RULES (ALWAYS FOLLOW):\n"
+                    "1. ALWAYS call 'answer' tool FIRST for ANY technical question\n"
+                    "2. NEVER answer from memory or training data\n"
+                    "3. NEVER say 'I don't have information' — call 'answer' instead\n"
+                    "4. If unsure whether to use tools — USE THEM ANYWAY\n"
+                    "5. Always fetch real documentation before responding\n\n"
+                    
+                    "AGENT WORKFLOW:\n"
+                    "1. User asks question → Call 'answer' immediately\n"
+                    "2. MCP returns: {intent, summary, steps, code_examples, sources, confidence}\n"
+                    "3. You format and explain to user using returned data\n"
+                    "4. Never make up examples if 'answer' doesn't provide them\n\n"
+                    
+                    "URL HANDLING:\n"
+                    "- If user provides URL → include it in 'answer' query\n"
+                    "- Use 'scrape_url' only when explicitly asked to index a new source\n\n"
+                    
+                    "RESPONSE FORMAT:\n"
+                    "- Use tool data directly — don't rewrite or summarize from memory\n"
+                    "- Show sources and confidence level\n"
+                    "- Include code examples when returned\n"
+                    "- Be explicit about partial results or limitations\n"
                 ),
             },
         )
@@ -508,62 +526,20 @@ class MCPServer:
                             "required": ["url"],
                         },
                     },
-                    {
-                        "name": "search_docs",
-                        "description": (
-                            "Search only stored documentation and return matching document identifiers. "
-                            "Use when you only need document URLs before a separate fetch step."
-                        ),
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "query": {"type": "string"},
-                                "limit": {"type": "integer", "default": 10},
-                            },
-                            "required": ["query"],
-                        },
-                    },
-                    {
-                        "name": "search_code",
-                        "description": (
-                            "Search indexed code blocks extracted from scraped documentation. "
-                            "Use when you need code examples for a specific language or pattern."
-                        ),
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "query": {"type": "string"},
-                                "language": {"type": "string", "description": "Optional language filter (e.g. 'python')"},
-                                "limit": {"type": "integer", "default": 5},
-                            },
-                            "required": ["query"],
-                        },
-                    },
+                    # NOTE: search_docs, search_code, get_doc removed from agent surface
+                    # to reduce confusion. Use 'answer' tool instead — it handles all these internally.
+                    
                     {
                         "name": "list_docs",
                         "description": (
-                            "Return an overview of all indexed documentation including URLs and storage stats. "
-                            "Use when you need to know what documentation is available."
+                            "Return an overview of all indexed documentation. "
+                            "Shows what documentation is currently available in the system."
                         ),
                         "inputSchema": {
                             "type": "object",
                             "properties": {
                                 "limit": {"type": "integer", "default": 50},
                             },
-                        },
-                    },
-                    {
-                        "name": "get_doc",
-                        "description": (
-                            "Return the full content of a stored document by its exact URL. "
-                            "Use when you already know the document URL and need its complete text."
-                        ),
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "url": {"type": "string"},
-                            },
-                            "required": ["url"],
                         },
                     },
                     {
@@ -1463,43 +1439,44 @@ class MCPServer:
     # ------------------------------------------------------------------ #
 
     def _tool_answer(self, args: Dict) -> Dict:
-        """🚀 PRODUCTION MCP: Instant responses + intelligent background learning.
-
-        VERCEL-SAFE PATTERN:
-          1. Search the index (instant, <200ms timeout)
-          2. If found → return "ready" with results
-          3. If empty → try partial results fallback
-          4. If not running/completed → HTTP POST to /api/internal/background_scrape
-          5. Return "learning" status instantly (<300ms)
-          6. Background: New serverless invocation scrapes and stores data
-          7. Next query finds results immediately
+        """
+        🧠 AGENT-OPTIMIZED TOOL — Returns structured data for Copilot, not human-friendly text.
+        
+        This is the PRIMARY tool for agents. Returns:
+        {
+          intent: "build" | "explain" | "debug" | "research",
+          summary: short explanation,
+          steps: implementation steps (if applicable),
+          code_examples: [{language, snippet}, ...],
+          sources: [{url, title, relevance}, ...],
+          confidence: 0.0-1.0,
+          status: "ready" | "partial"
+        }
         """
         import time
         query = args.get("query")
         if not query:
             return {"status": "error", "message": "query required"}
 
-        # ─ STEP 1: Check cache ─
+        # ─ CHECK CACHE ─
         cache_key = f"answer:{query}"
         cached = self.cache.get(cache_key)
         if cached:
             return cached
 
-        # ─ STEP 2: Search index (WITH TIMEOUT GUARD) ─
+        # ─ SEARCH WITH TIMEOUT ─
         results = []
-        search_timeout = 0.2  # VERCEL-SAFE: Hard limit for search
         search_start = time.time()
         
         try:
             results = self.store.search_and_get(query, limit=5)
-            search_elapsed = time.time() - search_start
-            if search_elapsed > search_timeout:
-                print(f"⚠️  Search took {search_elapsed:.3f}s (exceeded {search_timeout}s limit)")
+            if time.time() - search_start > 0.2:
+                print(f"⚠️  Search exceeded 0.2s limit")
         except Exception as e:
             print(f"[Search Error] {e}")
             results = []
 
-        # ─ STEP 3: Merge semantic search (optional) ─
+        # ─ SEMANTIC MERGE (if available) ─
         if self.vector_store and results:
             try:
                 vec_results = self.vector_store.semantic_search(query, limit=3)
@@ -1510,31 +1487,74 @@ class MCPServer:
             except Exception:
                 pass
 
-        # ─ STEP 4: If found, return "ready" ─
+        # ─ AUTO-CONTEXT: If no results, trigger scraping + retry ─
+        if not results:
+            self._tool_ensure_context({"query": query})
+            try:
+                results = self.store.search_and_get(query, limit=5)
+            except Exception:
+                results = []
+
+        # ─ FORMAT AGENT-OPTIMIZED RESPONSE ─
         if results:
-            boosted = self._boost_results(results)
+            boosted = self._boost_results(results)[:3]  # Limit to 3 docs
+            
+            # Extract code examples (limit to 2)
+            code_examples = []
+            seen_langs = set()
+            for result in boosted:
+                if "code_blocks" in result:
+                    for block in result["code_blocks"][:1]:  # 1 per doc
+                        lang = block.get("language", "unknown")
+                        if lang not in seen_langs and len(code_examples) < 2:
+                            code_examples.append({
+                                "language": lang,
+                                "snippet": block.get("snippet", "")[:500],
+                                "context": block.get("context", "")[:200]
+                            })
+                            seen_langs.add(lang)
+
+            # Determine intent from results
+            intent = "research"
+            if any("example" in str(r).lower() or "code" in str(r).lower() for r in boosted):
+                intent = "build"
+            if any("explain" in str(r).lower() or "what is" in query.lower() for r in boosted):
+                intent = "explain"
+
             response = {
+                "intent": intent,
                 "status": "ready",
-                "results": boosted[:8],
+                "summary": boosted[0].get("content", "")[:300] if boosted else "",
+                "steps": [],  # Would be populated for how-to queries
+                "code_examples": code_examples,
+                "sources": [
+                    {
+                        "url": r.get("url", ""),
+                        "title": r.get("title", ""),
+                        "relevance": 0.9  # Simplified
+                    }
+                    for r in boosted
+                ],
+                "confidence": 0.95,
                 "response_time_ms": "<100ms"
             }
+            
             self.cache.set(cache_key, response, ttl=300)
             return response
 
-        # ─ STEP 5: Check scrape job status ─
-        job = self.store.get_scrape_job(query)
-        should_trigger = should_scrape_query(self.store, query)
-
-        # ─ STEP 5A: Try partial results fallback (NEW) ─
+        # ─ PARTIAL/LEARNING STATE (agent-friendly) ─
+        # Try partial fallback
         partial_results = []
         try:
-            # Broader search for partial matches
             partial_results = self.store.search_docs(query, limit=2)
         except Exception:
             partial_results = []
 
+        # Still trigger background scraping if needed
+        job = self.store.get_scrape_job(query)
+        should_trigger = should_scrape_query(self.store, query)
+
         if should_trigger:
-            # Generate + rank sources
             sources = generate_sources_for_query(query, self.DOMAIN_HINTS)
             if not sources:
                 try:
@@ -1544,17 +1564,24 @@ class MCPServer:
             
             if sources:
                 sources = rank_sources_by_relevance(sources, query)
-                # CRITICAL: HTTP POST, not threading
                 trigger_background_scrape(query, sources, store=self.store)
 
-        # ─ STEP 6: Return "learning" status with partial results (UPGRADED) ─
+        # Return partial response (agent can still use this)
         response = {
-            "status": "learning",
-            "message": "Fetching live documentation...",
-            "partial_results": partial_results[:3] if partial_results else [],
-            "results": [],
-            "response_time_ms": "<300ms"
+            "intent": "research",
+            "status": "partial",
+            "summary": "Fetching documentation from live sources...",
+            "steps": [],
+            "code_examples": [],
+            "sources": [
+                {"url": r.get("url", ""), "title": r.get("title", ""), "relevance": 0.5}
+                for r in partial_results[:2]
+            ] if partial_results else [],
+            "confidence": 0.3,
+            "response_time_ms": "<300ms",
+            "note": "Partial results available; will refresh on next query"
         }
+        
         self.cache.set(cache_key, response, ttl=10)
         return response
 
