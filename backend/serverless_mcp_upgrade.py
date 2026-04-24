@@ -156,13 +156,14 @@ def should_scrape_query(store, query: str) -> bool:
 
 def trigger_background_scrape(query: str, urls: Optional[List[str]] = None, store=None) -> bool:
     """
-    True fire-and-forget background scrape trigger.
+    Fire-and-forget background scrape with duplicate prevention.
     
     VERCEL-SAFE:
     - Uses direct HTTP POST (not threading)
     - True fire-and-forget (minimal timeout = instant return)
     - 0.001s timeout ensures response returns immediately
     - Never blocks the request thread
+    - Prevents duplicate concurrent scrapes via global lock
     
     Args:
         query: User query (for logging)
@@ -170,12 +171,25 @@ def trigger_background_scrape(query: str, urls: Optional[List[str]] = None, stor
         store: SQLiteStore for marking job as RUNNING
     
     Returns:
-        True if POST sent, False if exception
+        True if POST sent, False if exception or already in progress
     """
     try:
+        # ─ CHECK LOCK: Prevent duplicate concurrent scrapes ─
+        # This is set globally at app startup and checked here
+        # If query is already being scraped, skip
+        from app import SCRAPE_IN_PROGRESS
+        
+        if query in SCRAPE_IN_PROGRESS:
+            print(f"[Background] ⏭️  Scrape already in progress for: {query}")
+            return False
+        
+        # Add to lock
+        SCRAPE_IN_PROGRESS.add(query)
+        
         base_url = os.getenv("BASE_URL")
         if not base_url:
             print(f"[Background] BASE_URL not set, skipping")
+            SCRAPE_IN_PROGRESS.discard(query)
             return False
         
         # Mark scrape job as RUNNING (prevents duplicate scrapes)
@@ -204,10 +218,16 @@ def trigger_background_scrape(query: str, urls: Optional[List[str]] = None, stor
             # This is intentional - we don't wait for success confirmation
             pass
         
-        print(f"[Background] Fire-and-forget sent for: {query}")
+        print(f"[Background] 🔥 Fire-and-forget sent for: {query}")
         return True
     except Exception as e:
-        print(f"[Background] Scrape trigger failed: {e}")
+        print(f"[Background] ❌ Scrape trigger failed: {e}")
+        # Clean up lock on error
+        try:
+            from app import SCRAPE_IN_PROGRESS
+            SCRAPE_IN_PROGRESS.discard(query)
+        except:
+            pass
         return False
 
 

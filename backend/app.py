@@ -53,6 +53,10 @@ CORS(
 # ─── Import error tracking ────────────────────────────────────────────────────
 _import_errors = dict(IMPORT_ERRORS)
 
+# ─── SCRAPE LOCK (Prevent duplicate concurrent scrapes) ──────────────────────
+# Global set tracking queries currently being scraped
+# Prevents: User asks → scrape triggers → User asks again → DUPLICATE SCRAPE
+SCRAPE_IN_PROGRESS = set()
 
 # ─── HTML parsing helper (used by /api/scrape) ────────────────────────────────
 from urllib.parse import urljoin
@@ -380,20 +384,24 @@ def background_scrape():
     """
     VERCEL-OPTIMIZED: Process ONE URL per invocation, chain remaining.
     
+    CRITICAL: This endpoint is ISOLATED:
+    - Only calls _tool_scrape_url (NO MCP logic)
+    - Never calls _tool_answer or search (prevents loops)
+    - Clears SCRAPE_IN_PROGRESS lock when done
+    
     Called via fire-and-forget HTTP POST from MCP tools.
     
-    CRITICAL PATTERN:
+    PATTERN:
     1. Process ONLY first URL in this invocation
     2. If more URLs remain → POST next invocation immediately
     3. Each invocation runs independently (Vercel-safe)
     4. Total time: ~2-3s per URL (well under 10s limit)
     
     PRODUCTION FEATURES:
-    - Tracks scrape job status (RUNNING → COMPLETED)
     - One URL per invocation (Vercel safety)
     - Recursive chaining (auto-triggers next batch)
     - Hard 8-second timeout guard
-    - Non-blocking fire-and-forget
+    - Clears scrape lock (prevents duplicates)
     """
     data = request.json or {}
     query = data.get("query", "").strip()
@@ -416,7 +424,7 @@ def background_scrape():
     try:
         print(f"[Background] Processing URL 1/{len(all_urls)}: {url_to_process}")
         
-        # Scrape SINGLE URL only
+        # ─ ISOLATED: ONLY scrape, NO MCP logic ─
         try:
             result = mcp_server._tool_scrape_url({
                 "url": url_to_process,
@@ -424,7 +432,7 @@ def background_scrape():
                 "max_depth": 1  # Shallow crawl
             })
             
-            # Record success in domain learner
+            # Record success in domain learner (minimal, no MCP calls)
             if hasattr(mcp_server, 'domain_learner') and not result.get("error"):
                 mcp_server.domain_learner.record_success(query, url_to_process)
                 print(f"[Background] ✅ Scraped: {url_to_process}")
@@ -454,13 +462,18 @@ def background_scrape():
                     print(f"[Background] 🔗 Chained next batch ({len(remaining_urls)} URLs remaining)")
                 except Exception as e:
                     print(f"[Background] ⚠️  Failed to chain next URLs: {e}")
+                    # Clear lock on chain failure so retry can happen
+                    SCRAPE_IN_PROGRESS.discard(query)
         else:
-            # All URLs processed - mark COMPLETED
+            # All URLs processed - mark COMPLETED and clear lock
             try:
                 mcp_server.store.upsert_scrape_job(query, "completed")
                 print(f"[Background] ✅ Job COMPLETED: {query}")
             except Exception as e:
                 print(f"[Background] ⚠️  Failed to mark job COMPLETED: {e}")
+            
+            # IMPORTANT: Clear lock so future queries can scrape again
+            SCRAPE_IN_PROGRESS.discard(query)
         
         return jsonify({
             "status": "done",
