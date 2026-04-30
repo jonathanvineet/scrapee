@@ -797,17 +797,33 @@ class SmartScraper:
             url = url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
             print(f"[SCRAPE] Rewrote to raw URL: {url}")
 
-        # Raw pass-through for XML/JSON files and GitHub raw URLs — no HTML parsing needed
-        if url.endswith(".xml") or url.endswith(".json") or "github.com" in url:
+        # 🔥 BONUS FIX: Raw pass-through for config files (no HTML parsing)
+        config_extensions = (".xml", ".json", ".yaml", ".yml", ".toml", ".conf", ".config", ".properties")
+        if url.lower().endswith(config_extensions) or "github.com" in url and url.endswith((".xml", ".json", ".yaml", ".yml")):
             html = self.fetch_with_timeout(url, timeout=timeout)
             if html:
+                # Detect file type for language tag
+                file_type = "config"
+                if url.lower().endswith(".xml"):
+                    file_type = "xml"
+                elif url.lower().endswith((".json", ".jsonld")):
+                    file_type = "json"
+                elif url.lower().endswith((".yaml", ".yml")):
+                    file_type = "yaml"
+                elif url.lower().endswith((".toml", ".properties")):
+                    file_type = "toml"
+                
                 return {
                     "url": url,
-                    "title": "Raw File",
+                    "title": "Raw Configuration File",
                     "content": html[:50000],
-                    "code_blocks": [],
+                    "code_blocks": [{
+                        "snippet": html[:50000],
+                        "language": file_type,
+                        "context": "configuration file"
+                    }],
                     "topics": [],
-                    "metadata": {"title": "Raw File"}
+                    "metadata": {"title": f"Raw {file_type.upper()} File", "type": "config"}
                 }
 
         # GitHub repo detection: use GitHub-specific extraction

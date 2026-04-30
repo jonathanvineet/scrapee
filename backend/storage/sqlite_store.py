@@ -742,6 +742,44 @@ class SQLiteStore:
             )
         return payload
     
+    def get_recent_docs(self, limit: int = 3) -> List[Dict]:
+        """🔥 CRITICAL FALLBACK: Get most recent docs when search fails.
+        
+        This is the key to fixing "returns nothing" — when FTS search yields empty,
+        we fallback to recent docs (they're probably relevant anyway).
+        
+        Args:
+            limit: Number of docs to return
+        
+        Returns:
+            List of recent docs with URL, title, snippet
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, url, title, 
+                   substr(content, 1, 400) AS snippet,
+                   scraped_at
+            FROM docs
+            ORDER BY scraped_at DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,)
+        )
+        results = [dict(row) for row in cursor.fetchall()]
+        
+        # Format to match search_and_get output
+        payload = []
+        for row in results:
+            payload.append({
+                "url": row.get("url", ""),
+                "title": row.get("title", "") or row.get("url", ""),
+                "snippet": (row.get("snippet", "") or "")[:400],
+                "score": 0.0  # No score, it's a fallback
+            })
+        
+        return payload
+    
     def search_code(self, query: str, language: str = None, limit: int = 10) -> List[Dict]:
         """
         Search code blocks.

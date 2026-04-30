@@ -1178,7 +1178,10 @@ class MCPServer:
     def _tool_get_context(self, args: Dict) -> Dict:
         """PRIMARY CONTEXT ENGINE: Feed Copilot real docs, never hallucinate.
         
-        🔥 CRITICAL FIX: Live scrape fallback on first call so Copilot always gets real data
+        🔥 CRITICAL ARCHITECTURE: Three-layer fallback prevents empty results:
+        1. FTS search (semantic-ish)
+        2. Recent docs fallback (if FTS miss)
+        3. Live scrape (if database empty)
         """
         query = args.get("query", "").strip()
         if not query:
@@ -1189,12 +1192,12 @@ class MCPServer:
         if cached:
             return cached
 
-        # Smart search with early exit (keeps < 300ms)
+        # Layer 1: Smart search with early exit (keeps < 300ms)
         top_results = self._smart_search_with_early_exit(query)
         
         if top_results:
-            # FINAL FIX #3 & #4: Limit context + add relevance signal
-            top_results = top_results[:3]  # FIX #3: Limit to top 3
+            # Search hit! Return immediately
+            top_results = top_results[:3]
             formatted_context = self._format_context_for_llm(top_results)
             response = {
                 "status": "ready",
@@ -1204,8 +1207,23 @@ class MCPServer:
             self.cache.set(cache_key, response, ttl=3600)
             return response
 
-        # 🔥 DATABASE EMPTY → DO LIVE SCRAPE (CRITICAL FIX #1)
-        # Instead of "try again later", scrape NOW and answer immediately
+        # Layer 2: Search miss but data exists → fallback to recent docs
+        # 🔥 THIS IS THE KEY FIX: Don't assume "no results" = "no data"
+        recent_docs = self.store.get_recent_docs(limit=3)
+        if recent_docs:
+            print(f"[Context] Search miss but found {len(recent_docs)} recent docs → fallback")
+            formatted_context = self._format_context_for_llm(recent_docs)
+            response = {
+                "status": "partial",
+                "context": formatted_context,
+                "sources": [r["url"] for r in recent_docs],
+                "note": "Search didn't find exact match, returning recent docs"
+            }
+            self.cache.set(cache_key, response, ttl=600)  # Short TTL for fallback
+            return response
+
+        # Layer 3: Database empty → DO LIVE SCRAPE
+        print(f"[Context] No cached docs, triggering live scrape for: {query}")
         
         # 🔥 OPTIMIZATION: Use domain memory if we've seen this query before
         if query in self.query_to_domain:
@@ -1235,7 +1253,7 @@ class MCPServer:
                         # 🔥 OPTIMIZATION: Remember what source worked for this query
                         self.query_to_domain[query] = source_url
                         
-                        # Search again NOW
+                        # Search again NOW (should find it in recent docs at least)
                         top_results = self._smart_search_with_early_exit(query)
                         if top_results:
                             top_results = top_results[:3]
@@ -1250,16 +1268,16 @@ class MCPServer:
                 except Exception:
                     pass  # Try next source
         
-        # FIX #5: Always return something useful (never empty)
-        # 🔥 CRITICAL: Improve first response with hints so Copilot doesn't ignore
+        # Last resort: Return learning message + trigger background scrape
         hint = self._detect_doc_domain(query)
+        learning_context = [
+            f"**Status:** Learning mode\n\nSearching for documentation about: **{query}**",
+            f"**Expected source:** {hint}\n\nFetching official sources in background..." if hint else "**Fetching official sources...**",
+            "**Next steps:** Please try your query again in 5-10 seconds for better results."
+        ]
         return {
             "status": "learning",
-            "context": [
-                f"Searching documentation for: {query}",
-                f"Expected source: {hint}" if hint else "Fetching official sources...",
-                "Fetching relevant documentation in background..."
-            ],
+            "context": learning_context,
             "sources": [],
             "hint": hint
         }
@@ -1357,26 +1375,32 @@ class MCPServer:
         scored_results.sort(key=lambda x: x[0], reverse=True)
         return [r for score, r in scored_results]
 
-    def _format_context_for_llm(self, results: List[Dict]) -> str:
-        """FIX #3: Strict format + FINAL FIX #4: Add relevance signal."""
+    def _format_context_for_llm(self, results: List[Dict]) -> List[str]:
+        """🔥 CRITICAL FIX #3: Return context blocks as ARRAY, not string.
+        
+        MCP expects list of context blocks, each with URL and relevance.
+        This is what Copilot reads (not answers, pure context).
+        """
         blocks = []
         
         for i, r in enumerate(results):
             url = r.get('url', 'unknown')
-            snippet = r.get('snippet', '')[:500]  # FINAL FIX #3: Limit to 500 chars
+            title = r.get('title', 'Document')
+            snippet = r.get('snippet', '')[:500]  # Limit to 500 chars per block
             
-            # FINAL FIX #4: Add relevance signal
+            # Add relevance signal (HIGH → MEDIUM → LOW)
             relevance = "HIGH" if i == 0 else "MEDIUM" if i == 1 else "LOW"
             
+            # Format as context block (Copilot reads this, not answers)
             block = (
-                f"SOURCE: {url}\n"
-                f"RELEVANCE: {relevance}\n"
-                f"CONTENT:\n"
+                f"## {title}\n"
+                f"**Source:** {url}  \n"
+                f"**Relevance:** {relevance}  \n\n"
                 f"{snippet}"
             )
             blocks.append(block)
         
-        return "\n\n---\n\n".join(blocks)
+        return blocks
 
     def _tool_answer(self, args: Dict) -> Dict:
         """
