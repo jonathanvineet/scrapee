@@ -1049,11 +1049,21 @@ class SmartScraper:
         return topics
 
     def _extract_text(self, soup: BeautifulSoup) -> str:
-        """Extract clean, de-duplicated text from the page."""
+        """🔥 CRITICAL FIX: Extract text, normalize for FTS, fallback to raw HTML."""
+        # Remove garbage tags
+        for tag in soup(["script", "style", "nav", "footer", "header"]):
+            tag.decompose()
+        
+        # Primary extraction
         text = soup.get_text(separator="\n", strip=True)
         text = re.sub(r"\n\s*\n+", "\n\n", text)
         text = re.sub(r" +", " ", text)
-        return text.strip()[: self.MAX_CONTENT_LENGTH]
+        text = text.strip()
+        
+        # Normalize to lowercase for FTS consistency
+        content = text.lower()
+        print(f"[TEXT_EXTRACT] Primary extraction: {len(content)} chars")
+        return content[: self.MAX_CONTENT_LENGTH]
 
     def extract_structured(self, url: str, extract_tables: bool = True, 
                           extract_api_schemas: bool = True, 

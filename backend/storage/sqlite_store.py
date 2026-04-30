@@ -314,9 +314,12 @@ class SQLiteStore:
         """
         metadata = metadata or {}
 
+        # � CRITICAL NORMALIZATION
+        content = (content or "").lower().strip()
+        
         # 🚨 HARD VALIDATION — skip low-quality content
         if not content or len(content.strip()) < 200:
-            print(f"[SKIP] Low-quality content: {url}")
+            print(f"[SKIP] Low-quality content ({len(content)} chars): {url}")
             return False
 
         if not code_blocks and len(content.split()) < 50:
@@ -330,6 +333,10 @@ class SQLiteStore:
             scraped_at = datetime.utcnow().isoformat()
             
             cursor = self.conn.cursor()
+
+            # ✅ DEBUG: Log content extraction success
+            print(f"[SAVE] Processing: {url}")
+            print(f"[SAVE] Content length: {len(content)} chars | Words: {len(content.split())}")
 
             # Content-level deduplication: skip if identical content already stored (different URL)
             content_fingerprint = content[:500]
