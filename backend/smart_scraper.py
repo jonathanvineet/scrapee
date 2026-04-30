@@ -673,10 +673,14 @@ class SmartScraper:
             print("[FALLBACK] Using raw extraction")
             parsed = self.extract_fallback(html)
         
-        # Validate content
+        # FIX #4: Validate content — but ALWAYS accept something
         content = parsed.get("content", "").strip()
         if not content or len(content) < 20:
-            return {"url": url, "error": "Page has insufficient content (< 20 characters)"}
+            # Last resort: use raw text (don't reject)
+            content = html[:50000].strip() if html else ""
+        
+        if not content:
+            return {"url": url, "error": "Page has insufficient content"}
         
         # Build response
         metadata = parsed.get("metadata", {})

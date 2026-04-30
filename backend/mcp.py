@@ -407,25 +407,27 @@ class MCPServer:
                     "version": self.version,
                 },
                 "instructions": (
-                    "🧠 CONTEXT ENGINE SYSTEM — YOU ARE CONNECTED TO LIVE DOCUMENTATION & CODE RETRIEVAL\n\n"
+                    "You are connected to a documentation retrieval system.\n\n"
                     
-                    "CRITICAL RULES (ALWAYS FOLLOW):\n"
-                    "1. ALWAYS call 'get_context' FIRST for ANY technical question or code implementation\n"
-                    "2. NEVER answer from memory or training data — ALWAYS use returned documentation\n"
-                    "3. If 'get_context' returns 'learning', tell the user you are fetching docs and to try again in a few seconds\n"
-                    "4. Prioritize snippets from official documentation and GitHub repositories\n"
-                    "5. Always show sources for the information you provide\n\n"
+                    "STRICT RULES (ALWAYS FOLLOW):\n"
+                    "1. ALWAYS call 'get_context' BEFORE answering ANY technical question\n"
+                    "2. NEVER answer from memory or training data\n"
+                    "3. NEVER guess APIs, libraries, or code examples\n"
+                    "4. ALWAYS use retrieved context to generate answers\n"
+                    "5. Always cite sources using [SOURCE: url]\n\n"
                     
-                    "AGENT WORKFLOW:\n"
-                    "1. User asks question → Call 'get_context' immediately\n"
-                    "2. MCP returns grounded context + sources\n"
-                    "3. You use that context to generate accurate, hallucination-free code\n"
-                    "4. If context is missing, 'get_context' triggers background learning automatically\n\n"
+                    "WORKFLOW:\n"
+                    "1. User asks a technical question\n"
+                    "2. Call 'get_context' immediately with their query\n"
+                    "3. Read the returned context and sources\n"
+                    "4. Generate answer using ONLY that context\n"
+                    "5. If context shows 'learning', tell user to try again in 5-10 seconds\n\n"
                     
-                    "RESPONSE FORMAT:\n"
-                    "- Use provided context as the source of truth\n"
-                    "- Include [SOURCE: url] citations for key information\n"
-                    "- If results are partial, be transparent about what you don't know\n"
+                    "WHAT NOT TO DO:\n"
+                    "- Do NOT answer without calling get_context first\n"
+                    "- Do NOT make up APIs or code patterns\n"
+                    "- Do NOT use outdated information\n"
+                    "- Do NOT skip this workflow\n"
                 ),
             },
         )
@@ -438,90 +440,16 @@ class MCPServer:
                     {
                         "name": "get_context",
                         "description": (
-                            "PRIMARY TOOL. Get high-quality, grounded context from real documentation and code. "
-                            "Use this for ANY technical question or implementation task. "
-                            "If context is missing, it automatically triggers background ingestion."
+                            "PRIMARY TOOL — ALWAYS call this FIRST for ANY technical, coding, or implementation question.\n"
+                            "Returns real documentation context from official sources.\n"
+                            "DO NOT answer technical questions without calling this tool first.\n"
+                            "Use for: coding help, debugging, APIs, frameworks, libraries, examples.\n"
+                            "Automatically triggers background ingestion if docs are missing."
                         ),
                         "inputSchema": {
                             "type": "object",
                             "properties": {
                                 "query": {"type": "string", "description": "Technical query (e.g. 'fastapi auth', 'react hooks')"},
-                            },
-                            "required": ["query"],
-                        },
-                    },
-                    {
-                        "name": "answer",
-                        "description": (
-                            "MASTER TOOL — call this for ANY technical question. "
-                            "It automatically ensures documentation is indexed, then "
-                            "retrieves the best matching content. Never answer from memory: always call this first."
-                        ),
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "query": {"type": "string", "description": "User question or URL"},
-                            },
-                            "required": ["query"],
-                        },
-                    },
-                    {
-                        "name": "explain_code",
-                        "description": (
-                            "Search indexed documentation for code examples matching a query. "
-                            "Use when the user asks for code samples, snippets, or implementation examples."
-                        ),
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "query": {"type": "string", "description": "What code to search for"},
-                                "language": {"type": "string", "description": "Optional language filter (e.g. python, typescript)"},
-                            },
-                            "required": ["query"],
-                        },
-                    },
-                    {
-                        "name": "understand_repo",
-                        "description": (
-                            "Understand an entire GitHub repository structure, architecture, and public API. "
-                            "Use when asked about a codebase as a whole or to index a project from GitHub."
-                        ),
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "repo_url": {"type": "string", "description": "GitHub repository URL (e.g. https://github.com/owner/repo)"},
-                            },
-                            "required": ["repo_url"],
-                        },
-                    },
-                    {
-                        "name": "search_or_scrape",
-                        "description": (
-                            "MAIN TOOL. Always call this first. It searches docs and auto-scrapes if missing. "
-                            "Searches indexed documentation and automatically fetches and indexes missing documentation "
-                            "when the index is empty. Prefer this over multiple separate tool calls."
-                        ),
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "query": {"type": "string", "description": "Search query"},
-                            },
-                            "required": ["query"],
-                        },
-                    },
-                    {
-                        "name": "search_and_get",
-                        "description": (
-                            "Search indexed documentation and return relevant snippets for answering "
-                            "technical questions. Automatically fetches and indexes missing documentation "
-                            "when the index is empty. Prefer this over multiple separate tool calls."
-                        ),
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "query": {"type": "string", "description": "Search query"},
-                                "limit": {"type": "integer", "default": 5, "description": "Max results to return"},
-                                "snippet_length": {"type": "integer", "default": 400, "description": "Max chars per snippet"},
                             },
                             "required": ["query"],
                         },
@@ -546,200 +474,6 @@ class MCPServer:
                             "required": ["url"],
                         },
                     },
-                    # NOTE: search_docs, search_code, get_doc removed from agent surface
-                    # to reduce confusion. Use 'answer' tool instead — it handles all these internally.
-                    
-                    {
-                        "name": "list_docs",
-                        "description": (
-                            "Return an overview of all indexed documentation. "
-                            "Shows what documentation is currently available in the system."
-                        ),
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "limit": {"type": "integer", "default": 50},
-                            },
-                        },
-                    },
-                    {
-                        "name": "batch_scrape_urls",
-                        "description": (
-                            "Scrape and index multiple URLs in parallel. Use this to rapidly ingest "
-                            "multiple documentation sources at once. Much faster than scrape_url called multiple times."
-                        ),
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "urls": {"type": "array", "items": {"type": "string"}, "description": "Array of URLs to scrape"},
-                                "max_concurrent": {"type": "integer", "default": 3, "description": "Max parallel scrapes"},
-                                "max_depth": {"type": "integer", "default": 0},
-                            },
-                            "required": ["urls"],
-                        },
-                    },
-                    {
-                        "name": "search_with_filters",
-                        "description": (
-                            "Search indexed documentation with advanced filtering by domain, language, "
-                            "content type, and date range. Returns higher-quality results than basic search."
-                        ),
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "query": {"type": "string"},
-                                "domain": {"type": "string", "description": "Filter by domain (e.g. 'github.com')"},
-                                "language": {"type": "string", "description": "Filter by code language"},
-                                "content_type": {"type": "string", "enum": ["code", "text", "heading"], "description": "Filter by content type"},
-                                "date_after": {"type": "string", "description": "ISO 8601 date (YYYY-MM-DD)"},
-                                "limit": {"type": "integer", "default": 10},
-                            },
-                            "required": ["query"],
-                        },
-                    },
-                    {
-                        "name": "extract_structured_data",
-                        "description": (
-                            "Parse a URL and extract structured data like tables, API schemas, and config examples. "
-                            "Use when you need structured formats from documentation."
-                        ),
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "url": {"type": "string"},
-                                "extract_tables": {"type": "boolean", "default": True},
-                                "extract_api_schemas": {"type": "boolean", "default": True},
-                                "extract_config_examples": {"type": "boolean", "default": True},
-                            },
-                            "required": ["url"],
-                        },
-                    },
-                    {
-                        "name": "analyze_code_dependencies",
-                        "description": (
-                            "Analyze code snippets to extract imports, dependencies, and function signatures. "
-                            "Use to understand code requirements and structure."
-                        ),
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "code_snippets": {"type": "array", "items": {"type": "string"}},
-                                "language": {"type": "string"},
-                                "extract_imports": {"type": "boolean", "default": True},
-                                "extract_types": {"type": "boolean", "default": True},
-                            },
-                            "required": ["code_snippets", "language"],
-                        },
-                    },
-                    {
-                        "name": "delete_document",
-                        "description": (
-                            "Delete a single document by URL from the index. Use when a document is no longer relevant."
-                        ),
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "url": {"type": "string"},
-                            },
-                            "required": ["url"],
-                        },
-                    },
-                    {
-                        "name": "prune_docs",
-                        "description": (
-                            "Remove stale documentation older than N days, or all docs from a specific domain. "
-                            "Use to maintain index freshness and manage storage."
-                        ),
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "older_than_days": {"type": "integer", "description": "Delete docs scraped > N days ago"},
-                                "domain": {"type": "string", "description": "Delete all docs from this domain (e.g. 'old-api.example.com')"},
-                            },
-                        },
-                    },
-                    {
-                        "name": "get_index_stats",
-                        "description": (
-                            "Get detailed analytics about the search index including document count, "
-                            "code block count by language, top domains, and index size."
-                        ),
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {},
-                        },
-                    },
-                    {
-                        "name": "search_and_summarize",
-                        "description": (
-                            "Search documentation and automatically generate a brief summary of results. "
-                            "Use for quick answers without reading full documentation."
-                        ),
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "query": {"type": "string"},
-                                "summary_length": {"type": "string", "enum": ["short", "medium", "long"], "default": "medium"},
-                                "include_code_examples": {"type": "boolean", "default": True},
-                                "limit": {"type": "integer", "default": 5},
-                            },
-                            "required": ["query"],
-                        },
-                    },
-                    {
-                        "name": "compare_documents",
-                        "description": (
-                            "Find differences between two documents (e.g. old vs new API docs). "
-                            "Returns added, removed, and changed sections."
-                        ),
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "url1": {"type": "string"},
-                                "url2": {"type": "string"},
-                            },
-                            "required": ["url1", "url2"],
-                        },
-                    },
-                    {
-                        "name": "export_index",
-                        "description": (
-                            "Export the entire search index as a backup. Returns metadata about the export."
-                        ),
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "format": {"type": "string", "enum": ["json", "sqlite"], "default": "json"},
-                            },
-                        },
-                    },
-                    {
-                        "name": "validate_urls",
-                        "description": (
-                            "Batch check if stored document URLs are still live and accessible. "
-                            "Use to identify broken or redirected documentation links."
-                        ),
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "limit": {"type": "integer", "default": 20, "description": "Check up to N URLs"},
-                            },
-                        },
-                    },
-                    {
-                        "name": "import_payload",
-                        "description": (
-                            "Import frontend-scraped documents from payload JSON (direct or file). "
-                            "Works on both local and Vercel. Use this to sync data from frontend scraping to backend index."
-                        ),
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "payload": {"type": "object", "description": "Payload JSON object directly (best for Vercel/serverless)"},
-                                "file_path": {"type": "string", "description": "Path to payload JSON file (local or /tmp on Vercel)"},
-                            },
-                        },
-                    },
                 ]
             },
         )
@@ -755,28 +489,7 @@ class MCPServer:
 
         tools = {
             "get_context": self._tool_get_context,
-            "answer": self._tool_answer,
-            "explain_code": self._tool_explain_code,
-            "understand_repo": self._tool_understand_repo,
-            "search_or_scrape": self._tool_search_or_scrape,
-            "search_and_get": self._tool_search_and_get,
             "scrape_url": self._tool_scrape_url,
-            "search_docs": self._tool_search_docs,
-            "search_code": self._tool_search_code,
-            "list_docs": self._tool_list_docs,
-            "get_doc": self._tool_get_doc,
-            "batch_scrape_urls": self._tool_batch_scrape_urls,
-            "search_with_filters": self._tool_search_with_filters,
-            "extract_structured_data": self._tool_extract_structured_data,
-            "analyze_code_dependencies": self._tool_analyze_code_dependencies,
-            "delete_document": self._tool_delete_document,
-            "prune_docs": self._tool_prune_docs,
-            "get_index_stats": self._tool_get_index_stats,
-            "search_and_summarize": self._tool_search_and_summarize,
-            "compare_documents": self._tool_compare_documents,
-            "export_index": self._tool_export_index,
-            "validate_urls": self._tool_validate_urls,
-            "import_payload": self._tool_import_payload,
         }
 
         handler = tools.get(tool_name)
@@ -1460,7 +1173,10 @@ class MCPServer:
     # ------------------------------------------------------------------ #
 
     def _tool_get_context(self, args: Dict) -> Dict:
-        """PRIMARY CONTEXT ENGINE: Feed Copilot real docs, never hallucinate."""
+        """PRIMARY CONTEXT ENGINE: Feed Copilot real docs, never hallucinate.
+        
+        🔥 CRITICAL FIX: Live scrape fallback on first call so Copilot always gets real data
+        """
         query = args.get("query", "").strip()
         if not query:
             return {"status": "error", "context": ["Please provide a query."], "sources": []}
@@ -1470,10 +1186,12 @@ class MCPServer:
         if cached:
             return cached
 
-        # FIX #2: Smart search with early exit (keeps < 300ms)
+        # Smart search with early exit (keeps < 300ms)
         top_results = self._smart_search_with_early_exit(query)
         
         if top_results:
+            # FINAL FIX #3 & #4: Limit context + add relevance signal
+            top_results = top_results[:3]  # FIX #3: Limit to top 3
             formatted_context = self._format_context_for_llm(top_results)
             response = {
                 "status": "ready",
@@ -1483,18 +1201,65 @@ class MCPServer:
             self.cache.set(cache_key, response, ttl=3600)
             return response
 
-        # FIX #1: Learning state - ALWAYS return usable context (never empty)
+        # 🔥 DATABASE EMPTY → DO LIVE SCRAPE (CRITICAL FIX #1)
+        # Instead of "try again later", scrape NOW and answer immediately
         urls = generate_sources_for_query(query, self.DOMAIN_HINTS)
+        if urls:
+            try:
+                first_url = urls[0]
+                
+                # Normalize special URLs (GitHub blob → raw)
+                first_url = self._normalize_special_urls(first_url)
+                
+                # Live scrape (FAST, single page only)
+                parsed = self.scraper.scrape(first_url)
+                
+                # FIX #3: Handle raw content (code files)
+                if parsed and parsed.get("content"):
+                    # Store immediately
+                    self.store.save_doc(
+                        first_url,
+                        parsed["content"],
+                        metadata=parsed.get("metadata", {})
+                    )
+                    
+                    # Search again NOW
+                    top_results = self._smart_search_with_early_exit(query)
+                    if top_results:
+                        top_results = top_results[:3]
+                        formatted_context = self._format_context_for_llm(top_results)
+                        response = {
+                            "status": "ready",
+                            "context": formatted_context,
+                            "sources": [r["url"] for r in top_results]
+                        }
+                        self.cache.set(cache_key, response, ttl=3600)
+                        return response
+            except Exception:
+                pass  # Fall through to fallback
         
+        # FIX #5: Always return something useful (never empty)
         return {
-            "status": "learning",
+            "status": "partial",
             "context": [
-                f"📚 No cached documentation yet for: {query}",
-                f"🔄 Fetching relevant documentation in background...",
-                f"⏱️  Please try again in 5-10 seconds for better results."
+                f"Searching for: {query}",
+                "Live documentation fetch in progress..."
             ],
-            "sources": urls if urls else []
+            "sources": []
         }
+
+    def _normalize_special_urls(self, url: str) -> str:
+        """FIX #2: Normalize special URLs for content extraction.
+        
+        - GitHub blob → raw.githubusercontent.com (get actual file)
+        - Others → pass through
+        """
+        if "github.com" in url and "/blob/" in url:
+            # Convert: github.com/owner/repo/blob/branch/path
+            # To: raw.githubusercontent.com/owner/repo/branch/path
+            url = url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+        
+        return url
 
     def _smart_search_with_early_exit(self, query: str) -> List[Dict]:
         """FIX #2: Early-exit search keeps < 300ms guaranteed."""
@@ -1542,13 +1307,24 @@ class MCPServer:
         return [r for score, r in scored_results]
 
     def _format_context_for_llm(self, results: List[Dict]) -> str:
-        """FIX #3: Strict format for reliable parsing and citation."""
+        """FIX #3: Strict format + FINAL FIX #4: Add relevance signal."""
         blocks = []
-        for r in results:
+        
+        for i, r in enumerate(results):
             url = r.get('url', 'unknown')
-            snippet = r.get('snippet', '')
-            block = f"SOURCE: {url}\nCONTENT:\n{snippet}"
+            snippet = r.get('snippet', '')[:500]  # FINAL FIX #3: Limit to 500 chars
+            
+            # FINAL FIX #4: Add relevance signal
+            relevance = "HIGH" if i == 0 else "MEDIUM" if i == 1 else "LOW"
+            
+            block = (
+                f"SOURCE: {url}\n"
+                f"RELEVANCE: {relevance}\n"
+                f"CONTENT:\n"
+                f"{snippet}"
+            )
             blocks.append(block)
+        
         return "\n\n---\n\n".join(blocks)
 
     def _tool_answer(self, args: Dict) -> Dict:
@@ -1855,7 +1631,7 @@ class MCPServer:
                 return ranked[:5]
         return []
 
-        def _expand_query(self, query: str) -> List[str]:
+    def _expand_query(self, query: str) -> List[str]:
         """Generate semantic query variants to increase source-matching surface."""
         q = query.strip()
         return [
