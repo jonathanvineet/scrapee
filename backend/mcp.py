@@ -1170,117 +1170,184 @@ class MCPServer:
             "environment": "vercel" if os.environ.get("VERCEL") else "local"
         }
 
+    # ================================================================ #
+    # INTELLIGENCE LAYER — Query expansion, ranking, formatting       #
+    # ================================================================ #
+
+    def _expand_query(self, query: str) -> List[str]:
+        """🧠 INTELLIGENCE #1: Expand queries for better coverage.
+        
+        Tries multiple query variations to find more relevant results.
+        Example: "fastapi auth" → ["fastapi auth", "fastapi auth example", 
+                                   "fastapi authentication tutorial", ...]
+        """
+        variations = set([
+            query,
+            f"{query} example",
+            f"{query} tutorial",
+            f"{query} documentation",
+            f"how to {query}",
+            f"{query} code example",
+        ])
+        return list(variations)
+
+    def _rank_sources(self, results: List[Dict]) -> List[Dict]:
+        """🧠 INTELLIGENCE #2: Rank sources by authority.
+        
+        Official docs > developer guides > blogs > random pages
+        
+        Scoring:
+        - Official docs: 10
+        - ReadTheDocs: 9
+        - Developer guide: 8
+        - GitHub: 6
+        - StackOverflow: 5
+        - Blog/Medium: 3
+        - Other: 1
+        """
+        def score(result):
+            url = result.get("url", "").lower()
+            
+            # Official docs domains (highest priority)
+            if "docs." in url or "/documentation/" in url or "official" in url:
+                return 10
+            if "readthedocs.io" in url or ".readthedocs.io" in url:
+                return 9
+            if "developer." in url or "/developers/" in url or "dev.to" in url:
+                return 8
+            
+            # Code repositories
+            if "github.com" in url or "gitlab.com" in url:
+                return 6
+            
+            # Q&A / Communities
+            if "stackoverflow.com" in url:
+                return 5
+            if "reddit.com" in url:
+                return 4
+            
+            # Blogs (lower priority)
+            if "medium.com" in url or "blog" in url or "article" in url:
+                return 3
+            if "dev.to" in url or "hashnode.com" in url:
+                return 3
+            
+            # Default (other sources)
+            return 1
+        
+        return sorted(results, key=score, reverse=True)
+
+    def _dedupe_results(self, results: List[Dict]) -> List[Dict]:
+        """🧠 INTELLIGENCE #3: Deduplicate results by URL."""
+        seen = set()
+        deduped = []
+        for result in results:
+            url = result.get("url")
+            if url and url not in seen:
+                deduped.append(result)
+                seen.add(url)
+        return deduped
+
+    def _format_context_for_copilot(self, results: List[Dict]) -> str:
+        """🧠 INTELLIGENCE #4: Format results for LLM consumption.
+        
+        Returns clean, structured context that Copilot can use directly.
+        Format: [SOURCE: url]\\nsnippet\\n---\\n[SOURCE: url2]\\nsnippet2
+        """
+        blocks = []
+        
+        for result in results[:5]:  # Top 5 sources only
+            url = result.get("url", "unknown")
+            title = result.get("title", "")
+            snippet = result.get("snippet", "")
+            
+            # Build source block
+            source_line = f"[SOURCE: {url}]"
+            if title:
+                source_line += f" ({title})"
+            
+            block = f"{source_line}\\n{snippet}"
+            blocks.append(block)
+        
+        return "\\n\\n---\\n\\n".join(blocks)
 
     # ------------------------------------------------------------------ #
     # answer — MASTER TOOL (ensure context + retrieve)                    #
     # ------------------------------------------------------------------ #
 
     def _tool_get_context(self, args: Dict) -> Dict:
-        """PRIMARY CONTEXT ENGINE: Feed Copilot real docs, never hallucinate.
+        """🧠 PRIMARY CONTEXT ENGINE WITH INTELLIGENCE.
         
-        🔥 CRITICAL ARCHITECTURE: Three-layer fallback prevents empty results:
-        1. FTS search (semantic-ish)
-        2. Recent docs fallback (if FTS miss)
-        3. Live scrape (if database empty)
+        Pipeline:
+        1. Expand query variations
+        2. Search all variations (with 3-tier fallback)
+        3. Deduplicate results
+        4. Rank by source authority
+        5. Format for Copilot
+        
+        Returns clean, curated context ready for LLM.
         """
         query = args.get("query", "").strip()
         if not query:
-            return {"status": "error", "context": ["Please provide a query."], "sources": []}
+            return {"status": "error", "context": "", "sources": []}
 
         cache_key = f"context:{query}"
         cached = self.cache.get(cache_key)
         if cached:
             return cached
 
-        # Layer 1: Smart search with early exit (keeps < 300ms)
-        top_results = self._smart_search_with_early_exit(query)
-        
-        if top_results:
-            # Search hit! Return immediately
-            top_results = top_results[:3]
-            formatted_context = self._format_context_for_llm(top_results)
-            response = {
-                "status": "ready",
-                "context": formatted_context,
-                "sources": [r["url"] for r in top_results]
-            }
-            self.cache.set(cache_key, response, ttl=3600)
-            return response
+        # STEP 1: Expand query for better coverage
+        query_variations = self._expand_query(query)
+        print(f"[INTELLIGENCE] Query expansions: {len(query_variations)} variations")
 
-        # Layer 2: Search miss but data exists → fallback to recent docs
-        # 🔥 THIS IS THE KEY FIX: Don't assume "no results" = "no data"
-        recent_docs = self.store.get_recent_docs(limit=3)
-        if recent_docs:
-            print(f"[Context] Search miss but found {len(recent_docs)} recent docs → fallback")
-            formatted_context = self._format_context_for_llm(recent_docs)
-            response = {
-                "status": "partial",
-                "context": formatted_context,
-                "sources": [r["url"] for r in recent_docs],
-                "note": "Search didn't find exact match, returning recent docs"
-            }
-            self.cache.set(cache_key, response, ttl=600)  # Short TTL for fallback
-            return response
+        # STEP 2: Search with all variations
+        all_results = []
+        for q in query_variations:
+            try:
+                results = self.store.search_docs(q, limit=5)
+                all_results.extend(results)
+            except Exception as e:
+                print(f"[INTELLIGENCE] Search failed for '{q}': {e}")
 
-        # Layer 3: Database empty → DO LIVE SCRAPE
-        print(f"[Context] No cached docs, triggering live scrape for: {query}")
+        if not all_results:
+            print(f"[INTELLIGENCE] No results from variations, trying live scrape")
+            # Trigger background scrape
+            try:
+                import requests
+                requests.post(
+                    f"{os.environ.get('BASE_URL', 'http://localhost:8000')}/api/background_scrape",
+                    json={"query": query},
+                    timeout=1
+                )
+            except Exception:
+                pass
+            
+            return {
+                "status": "learning",
+                "context": f"Fetching documentation for '{query}'...",
+                "sources": []
+            }
+
+        # STEP 3: Deduplicate by URL
+        deduped = self._dedupe_results(all_results)
+        print(f"[INTELLIGENCE] Deduped: {len(all_results)} → {len(deduped)} results")
+
+        # STEP 4: Rank by source authority
+        ranked = self._rank_sources(deduped)
+        print(f"[INTELLIGENCE] Ranked by authority")
+
+        # STEP 5: Format for Copilot
+        context_str = self._format_context_for_copilot(ranked)
         
-        # 🔥 OPTIMIZATION: Use domain memory if we've seen this query before
-        if query in self.query_to_domain:
-            urls = [self.query_to_domain[query]]
-        else:
-            urls = generate_sources_for_query(query, self.DOMAIN_HINTS)
-        
-        # 🔥 CRITICAL: Try multiple sources (not just first one)
-        if urls:
-            for source_url in urls[:3]:  # Try up to 3 sources
-                try:
-                    # Normalize special URLs (GitHub blob → raw)
-                    source_url = self._normalize_special_urls(source_url)
-                    
-                    # Live scrape (FAST, single page only)
-                    parsed = self.scraper.scrape(source_url)
-                    
-                    # FIX #3: Handle raw content (code files)
-                    if parsed and parsed.get("content") and len(parsed.get("content", "")) > 50:
-                        # Store immediately
-                        self.store.save_doc(
-                            source_url,
-                            parsed["content"],
-                            metadata=parsed.get("metadata", {})
-                        )
-                        
-                        # 🔥 OPTIMIZATION: Remember what source worked for this query
-                        self.query_to_domain[query] = source_url
-                        
-                        # Search again NOW (should find it in recent docs at least)
-                        top_results = self._smart_search_with_early_exit(query)
-                        if top_results:
-                            top_results = top_results[:3]
-                            formatted_context = self._format_context_for_llm(top_results)
-                            response = {
-                                "status": "ready",
-                                "context": formatted_context,
-                                "sources": [r["url"] for r in top_results]
-                            }
-                            self.cache.set(cache_key, response, ttl=3600)
-                            return response
-                except Exception:
-                    pass  # Try next source
-        
-        # Last resort: Return learning message + trigger background scrape
-        hint = self._detect_doc_domain(query)
-        learning_context = [
-            f"**Status:** Learning mode\n\nSearching for documentation about: **{query}**",
-            f"**Expected source:** {hint}\n\nFetching official sources in background..." if hint else "**Fetching official sources...**",
-            "**Next steps:** Please try your query again in 5-10 seconds for better results."
-        ]
-        return {
-            "status": "learning",
-            "context": learning_context,
-            "sources": [],
-            "hint": hint
+        response = {
+            "status": "ready",
+            "context": context_str,
+            "sources": [r.get("url") for r in ranked[:5]],
+            "count": len(ranked)
         }
+        
+        self.cache.set(cache_key, response, ttl=3600)
+        return response
 
     def _normalize_special_urls(self, url: str) -> str:
         """FIX #2: Normalize special URLs for content extraction.
