@@ -195,6 +195,9 @@ class MCPServer:
         # Persists for the lifetime of the process — makes repeated queries instant.
         self.domain_cache: Dict[str, str] = {}
 
+        # 🔥 CRITICAL: Domain memory (learns what source works for what query)
+        self.query_to_domain: Dict[str, str] = {}
+
         # ── Level 2: Semantic vector search ───────────────────────────────
         self.vector_store = None
         if VECTOR_AVAILABLE and get_vector_store:
@@ -1203,49 +1206,62 @@ class MCPServer:
 
         # 🔥 DATABASE EMPTY → DO LIVE SCRAPE (CRITICAL FIX #1)
         # Instead of "try again later", scrape NOW and answer immediately
-        urls = generate_sources_for_query(query, self.DOMAIN_HINTS)
+        
+        # 🔥 OPTIMIZATION: Use domain memory if we've seen this query before
+        if query in self.query_to_domain:
+            urls = [self.query_to_domain[query]]
+        else:
+            urls = generate_sources_for_query(query, self.DOMAIN_HINTS)
+        
+        # 🔥 CRITICAL: Try multiple sources (not just first one)
         if urls:
-            try:
-                first_url = urls[0]
-                
-                # Normalize special URLs (GitHub blob → raw)
-                first_url = self._normalize_special_urls(first_url)
-                
-                # Live scrape (FAST, single page only)
-                parsed = self.scraper.scrape(first_url)
-                
-                # FIX #3: Handle raw content (code files)
-                if parsed and parsed.get("content"):
-                    # Store immediately
-                    self.store.save_doc(
-                        first_url,
-                        parsed["content"],
-                        metadata=parsed.get("metadata", {})
-                    )
+            for source_url in urls[:3]:  # Try up to 3 sources
+                try:
+                    # Normalize special URLs (GitHub blob → raw)
+                    source_url = self._normalize_special_urls(source_url)
                     
-                    # Search again NOW
-                    top_results = self._smart_search_with_early_exit(query)
-                    if top_results:
-                        top_results = top_results[:3]
-                        formatted_context = self._format_context_for_llm(top_results)
-                        response = {
-                            "status": "ready",
-                            "context": formatted_context,
-                            "sources": [r["url"] for r in top_results]
-                        }
-                        self.cache.set(cache_key, response, ttl=3600)
-                        return response
-            except Exception:
-                pass  # Fall through to fallback
+                    # Live scrape (FAST, single page only)
+                    parsed = self.scraper.scrape(source_url)
+                    
+                    # FIX #3: Handle raw content (code files)
+                    if parsed and parsed.get("content") and len(parsed.get("content", "")) > 50:
+                        # Store immediately
+                        self.store.save_doc(
+                            source_url,
+                            parsed["content"],
+                            metadata=parsed.get("metadata", {})
+                        )
+                        
+                        # 🔥 OPTIMIZATION: Remember what source worked for this query
+                        self.query_to_domain[query] = source_url
+                        
+                        # Search again NOW
+                        top_results = self._smart_search_with_early_exit(query)
+                        if top_results:
+                            top_results = top_results[:3]
+                            formatted_context = self._format_context_for_llm(top_results)
+                            response = {
+                                "status": "ready",
+                                "context": formatted_context,
+                                "sources": [r["url"] for r in top_results]
+                            }
+                            self.cache.set(cache_key, response, ttl=3600)
+                            return response
+                except Exception:
+                    pass  # Try next source
         
         # FIX #5: Always return something useful (never empty)
+        # 🔥 CRITICAL: Improve first response with hints so Copilot doesn't ignore
+        hint = self._detect_doc_domain(query)
         return {
-            "status": "partial",
+            "status": "learning",
             "context": [
-                f"Searching for: {query}",
-                "Live documentation fetch in progress..."
+                f"Searching documentation for: {query}",
+                f"Expected source: {hint}" if hint else "Fetching official sources...",
+                "Fetching relevant documentation in background..."
             ],
-            "sources": []
+            "sources": [],
+            "hint": hint
         }
 
     def _normalize_special_urls(self, url: str) -> str:
@@ -1260,6 +1276,41 @@ class MCPServer:
             url = url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
         
         return url
+
+    def _detect_doc_domain(self, query: str) -> Optional[str]:
+        """🔥 CRITICAL FIX #3: Detect likely documentation domain from query.
+        
+        Returns first guess at which domain would have docs for this query.
+        Used to improve first response hint so Copilot doesn't ignore empty results.
+        """
+        query_lower = query.lower()
+        
+        # Domain hints based on query keywords
+        hints = {
+            "maven": "maven.apache.org",
+            "java": "docs.oracle.com",
+            "python": "docs.python.org",
+            "javascript": "developer.mozilla.org",
+            "node": "nodejs.org/docs",
+            "react": "react.dev",
+            "django": "docs.djangoproject.com",
+            "flask": "flask.palletsprojects.com",
+            "kubernetes": "kubernetes.io/docs",
+            "docker": "docs.docker.com",
+            "aws": "docs.aws.amazon.com",
+            "google cloud": "cloud.google.com/docs",
+            "azure": "docs.microsoft.com/azure",
+            "git": "git-scm.com/doc",
+            "sql": "mysql.com/doc",
+            "postgresql": "postgresql.org/docs",
+            "mongodb": "docs.mongodb.com",
+        }
+        
+        for keyword, domain in hints.items():
+            if keyword in query_lower:
+                return domain
+        
+        return None
 
     def _smart_search_with_early_exit(self, query: str) -> List[Dict]:
         """FIX #2: Early-exit search keeps < 300ms guaranteed."""
@@ -1964,10 +2015,13 @@ class MCPServer:
             # SmartCrawler needs seed_url passed to crawl() method
             # Other crawlers store start_url in __init__, so crawl() takes no args
             if isinstance(crawler, SmartCrawler):
+                # 🔥 CRITICAL: Hard limit on Vercel (max_pages=30 will timeout)
+                safe_max_depth = min(max_depth, 1)  # Force max_depth=1
+                safe_max_pages = 5  # Force max_pages=5 instead of 30
                 crawl_callback = lambda: crawler.crawl(
                     seed_url=url,
-                    max_pages=30,
-                    max_depth=max_depth
+                    max_pages=safe_max_pages,
+                    max_depth=safe_max_depth
                 )
             else:
                 # For other crawlers (Selenium, UltraFast), crawl() is parameter-less

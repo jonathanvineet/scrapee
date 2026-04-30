@@ -27,7 +27,71 @@ from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 
 
-# Documentation domains that are broadly trusted for scraping.
+# 🔥 CONTENT QUALITY FILTER
+def is_useful_content(content: str) -> bool:
+    """Check if content is actually useful (not error page/loading screen)."""
+    if not content:
+        return False
+    
+    if len(content) < 200:
+        return False
+    
+    bad_patterns = [
+        "enable javascript",
+        "loading...",
+        "please wait",
+        "404 not found",
+        "access denied",
+        "page not found",
+        "blocked",
+    ]
+    
+    content_lower = content.lower()
+    if any(p in content_lower for p in bad_patterns):
+        return False
+    
+    return True
+
+
+
+    """🚀 CRITICAL: Classify page type to select optimal parser.
+    
+    Returns: "github" | "config" | "wikipedia" | "docs" | "article" | "thin" | "generic"
+    """
+    url = url.lower()
+    html = html.lower() if html else ""
+
+    # GitHub (special structure)
+    if "github.com" in url:
+        return "github"
+
+    # Config files (XML, JSON, YAML)
+    if url.endswith((".xml", ".json", ".yaml", ".yml", ".conf", ".toml")):
+        return "config"
+
+    # Wikipedia (semi-structured)
+    if "wikipedia.org" in url:
+        return "wikipedia"
+
+    # Documentation sites (look for code + tables)
+    if "<pre" in html and "<code" in html:
+        return "docs"
+    if "<table" in html and ("<code" in html or "<h" in html):
+        return "docs"
+
+    # Article / blog (has article tag or main tag)
+    if "<article" in html or "<main" in html:
+        return "article"
+
+    # Too thin (probably error page)
+    if len(html) < 500:
+        return "thin"
+
+    # Fallback
+    return "generic"
+
+
+
 # Override via env var SCRAPEE_ALLOWED_DOMAINS (comma-separated, empty = allow all public).
 _ALLOWED_DOMAINS_ENV = ""
 try:
@@ -409,59 +473,164 @@ class SmartScraper:
         }
 
     def parse_html(self, html: str, url: str) -> Dict:
+        """🚀 ADAPTIVE PARSER — Routes to specialized parser based on page type.
+        
+        This is the CRITICAL FIX: use page type detection to select optimal parser.
         """
-        UNIVERSAL PARSER — routes to appropriate format handler.
+        # Step 1: Detect page type
+        page_type = detect_page_type(url, html)
+        print(f"[Parser] {page_type.upper()} detected for {url}")
         
-        AUTO-DETECTS:
-        - HTML documents → HTML parser (existing)
-        - XML configs → XML parser
-        - JSON configs → JSON parser
-        - Plain text → Text parser
-        
-        Also NORMALIZES URLs:
-        - GitHub blob → raw.githubusercontent
-        - Other conversions as needed
-        
-        Args:
-            html: Content string (misleading name for universal parser)
-            url:  Source URL
-        
-        Returns:
-            Dict with keys: content, code_blocks, topics, metadata
-        """
-        # Step 1: Normalize URL (GitHub blob → raw)
-        url = self._normalize_url(url)
-        
-        # Step 2: Detect content type
-        content_type = self._detect_content_type(html, url)
-        print(f"[Universal] Detected {content_type} from {url}")
-        
-        # Step 3: Route to appropriate parser
-        if content_type == "xml":
-            return self._parse_xml(html, url)
-        elif content_type == "json":
-            return self._parse_json(html, url)
-        elif content_type == "plaintext":
-            return self._parse_plaintext(html, url)
+        # Step 2: Route to specialized parser
+        if page_type == "github":
+            return self._parse_github(html, url)
+        elif page_type == "config":
+            return self._parse_config(html, url)
+        elif page_type == "wikipedia":
+            return self._parse_wikipedia(html, url)
+        elif page_type == "docs":
+            return self._parse_docs(html, url)
+        elif page_type == "article":
+            return self._parse_article(html, url)
+        elif page_type == "thin":
+            return self._parse_thin(html, url)
         else:
-            # Default to HTML parser (existing logic)
-            soup = BeautifulSoup(html or "", "html.parser")
+            return self._parse_generic(html, url)
 
-            # Strip navigation chrome
-            for element in soup(["script", "style", "nav", "footer", "header", "iframe"]):
-                element.decompose()
-
-            metadata = self._extract_metadata(soup, url)
-            code_blocks = self._extract_code_blocks(soup, url)
-            topics = self._extract_topics(soup)
-            content = self._extract_text(soup)
-
-            return {
-                "content": content,
-                "code_blocks": code_blocks,
-                "topics": topics,
-                "metadata": metadata,
+    def _parse_github(self, html: str, url: str) -> Dict:
+        """Parse GitHub files (code/markdown/config)."""
+        # GitHub raw content is usually already code
+        return {
+            "content": html[:100000],
+            "code_blocks": [{
+                "snippet": html[:50000],
+                "language": "code",
+                "context": "github file"
+            }],
+            "topics": [],
+            "metadata": {"title": "GitHub", "type": "github"}
         }
+
+    def _parse_config(self, html: str, url: str) -> Dict:
+        """Parse config files (XML/JSON/YAML) — just return as-is."""
+        return {
+            "content": html[:100000],
+            "code_blocks": [{
+                "snippet": html[:50000],
+                "language": "config",
+                "context": "configuration file"
+            }],
+            "topics": [],
+            "metadata": {"title": "Config File", "type": "config"}
+        }
+
+    def _parse_wikipedia(self, html: str, url: str) -> Dict:
+        """Parse Wikipedia (extract main content div)."""
+        soup = BeautifulSoup(html, "html.parser")
+        
+        # Wikipedia main content is in div id="mw-content-text"
+        content_div = soup.find("div", {"id": "mw-content-text"})
+        
+        if content_div:
+            text = content_div.get_text(" ", strip=True)
+        else:
+            text = soup.get_text(" ", strip=True)
+        
+        return {
+            "content": text[:100000],
+            "code_blocks": [],
+            "topics": [],
+            "metadata": {"title": "Wikipedia", "type": "wikipedia"}
+        }
+
+    def _parse_docs(self, html: str, url: str) -> Dict:
+        """Parse documentation sites (extract code + text)."""
+        soup = BeautifulSoup(html, "html.parser")
+        
+        # Remove noise
+        for tag in soup(["script", "style", "nav", "footer", "header"]):
+            tag.decompose()
+        
+        # Extract code blocks
+        code_blocks = []
+        for tag in soup.find_all(["pre", "code"]):
+            snippet = tag.get_text()
+            if len(snippet) > 10:
+                code_blocks.append({
+                    "snippet": snippet[:5000],
+                    "language": "",
+                    "context": ""
+                })
+        
+        # Extract text
+        text = soup.get_text(" ", strip=True)
+        
+        return {
+            "content": text[:100000],
+            "code_blocks": code_blocks[:5],
+            "topics": [],
+            "metadata": {"title": "Documentation", "type": "docs"}
+        }
+
+    def _parse_article(self, html: str, url: str) -> Dict:
+        """Parse articles/blogs (extract from article or main tag)."""
+        soup = BeautifulSoup(html, "html.parser")
+        
+        # Find main content
+        article = soup.find("article")
+        if not article:
+            article = soup.find("main")
+        if not article:
+            article = soup
+        
+        # Remove noise
+        for tag in article(["script", "style", "nav", "footer", "header"]):
+            tag.decompose()
+        
+        text = article.get_text(" ", strip=True)
+        
+        return {
+            "content": text[:100000],
+            "code_blocks": [],
+            "topics": [],
+            "metadata": {"title": "Article", "type": "article"}
+        }
+
+    def _parse_thin(self, html: str, url: str) -> Dict:
+        """Parse thin content (error pages, stubs) — try to extract something."""
+        soup = BeautifulSoup(html, "html.parser")
+        text = soup.get_text(" ", strip=True)
+        
+        return {
+            "content": text[:50000],
+            "code_blocks": [],
+            "topics": [],
+            "metadata": {"title": "Thin Content", "type": "thin"}
+        }
+
+    def _parse_generic(self, html: str, url: str) -> Dict:
+        """🔥 FALLBACK: Parse any HTML (never fail)."""
+        soup = BeautifulSoup(html or "", "html.parser")
+
+        # Strip navigation chrome
+        for element in soup(["script", "style", "nav", "footer", "header", "iframe"]):
+            element.decompose()
+
+        metadata = self._extract_metadata(soup, url)
+        code_blocks = self._extract_code_blocks(soup, url)
+        topics = self._extract_topics(soup)
+        content = self._extract_text(soup)
+
+        return {
+            "content": content,
+            "code_blocks": code_blocks,
+            "topics": topics,
+            "metadata": metadata,
+        }
+
+    # ------------------------------------------------------------------ #
+    # Private helpers                                                        #
+    # ------------------------------------------------------------------ #
 
     def _extract_github_readme(self, url: str, timeout: int = FETCH_TIMEOUT_SECONDS) -> Optional[str]:
         """
@@ -681,6 +850,11 @@ class SmartScraper:
         
         if not content:
             return {"url": url, "error": "Page has insufficient content"}
+        
+        # 🔥 CRITICAL: Filter useless content (error pages, loading screens)
+        if not is_useful_content(content):
+            print(f"[Quality] Rejecting low-quality content from {url}")
+            return {"url": url, "error": "Content quality too low (error page or loading screen)"}
         
         # Build response
         metadata = parsed.get("metadata", {})
