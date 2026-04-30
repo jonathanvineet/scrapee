@@ -166,6 +166,13 @@ class SmartScraper:
     # Public API                                                            #
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def normalize_url(url: str) -> str:
+        """🔥 RULE 4: URL normalization for GitHub and special cases."""
+        if "github.com" in url and "/blob/" in url:
+            return url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+        return url
+    
     def validate_url(self, url: str) -> Tuple[bool, str]:
         """
         Validate a URL for safety before scraping.

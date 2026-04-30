@@ -318,11 +318,11 @@ class SQLiteStore:
         content = (content or "").lower().strip()
         
         # 🚨 HARD VALIDATION — skip low-quality content
-        if not content or len(content.strip()) < 200:
+        if len(content) < 50:
             print(f"[SKIP] Low-quality content ({len(content)} chars): {url}")
             return False
 
-        if not code_blocks and len(content.split()) < 50:
+        if not code_blocks and len(content.split()) < 20:
             print(f"[SKIP] No useful data: {url}")
             return False
 
@@ -649,88 +649,74 @@ class SQLiteStore:
         return scored_results[:limit]
     
     def search_docs(self, query: str, limit: int = 10) -> List[Dict]:
-        """
-        Full-text search in documents with fuzzy/typo tolerance.
+        """🔥 RULE 3: 3-tier search fallback — NEVER RETURN EMPTY.
         
-        Args:
-            query: Search query
-            limit: Maximum results
-        
-        Returns:
-            List of dicts with url, title, snippet, rank
+        Tier 1: FTS with expansion (fast, precise)
+        Tier 2: LIKE fallback (comprehensive)
+        Tier 3: Recent docs (last resort, always returns something)
         """
+        query = query.lower()
         cursor = self.conn.cursor()
-        prepared_query = self._prepare_fts_query(query)
-        like_query = f"%{query}%"
         
-        print(f"[SEARCH] Query: {query!r} → FTS: {prepared_query!r}")
+        # TIER 1: FTS with expansion (word* wildcard)
+        fts_query = " OR ".join([f"{w}*" for w in query.split()])
+        print(f"[SEARCH] T1-FTS: {fts_query!r}")
         
-        # FTS5 MATCH cannot be combined with OR on external tables directly in SQLite.
-        # We run the FTS query first.
         try:
             cursor.execute(
                 """
-                SELECT
-                    d.id,
-                    d.url,
-                    d.title,
-                    snippet(docs_fts, 1, '[', ']', '...', 32) AS snippet,
-                    bm25(docs_fts) AS score
+                SELECT id, url, title,
+                       snippet(docs_fts, 1, '[', ']', '...', 32) AS snippet,
+                       bm25(docs_fts) AS score
                 FROM docs_fts
-                JOIN docs d ON docs_fts.rowid = d.id
                 WHERE docs_fts MATCH ?
-                ORDER BY score
                 LIMIT ?
                 """,
-                (prepared_query, limit),
+                (fts_query, limit),
             )
             results = [dict(row) for row in cursor.fetchall()]
-            print(f"[SEARCH] FTS found {len(results)} results")
+            print(f"[SEARCH] T1-FTS found {len(results)}")
+            
+            if results:
+                return results
         except Exception as e:
-            print(f"[SEARCH] FTS search failed: {e}, falling back to LIKE")
-            results = []
+            print(f"[SEARCH] T1-FTS failed: {e}")
         
-        # Fallback to LIKE if FTS yields fewer results than limit
-        if len(results) < limit:
-            remaining = limit - len(results)
-            exclude_ids = [r["id"] for r in results]
-            placeholders = ",".join("?" for _ in exclude_ids)
-            
-            if exclude_ids:
-                sql = f"""
-                    SELECT id, url, title, substr(content, 1, 200) AS snippet, 0.0 AS score
-                    FROM docs
-                    WHERE (title LIKE ? OR content LIKE ?)
-                      AND id NOT IN ({placeholders})
-                    LIMIT ?
-                """
-                cursor.execute(sql, (like_query, like_query, *exclude_ids, remaining))
-            else:
-                sql = """
-                    SELECT id, url, title, substr(content, 1, 200) AS snippet, 0.0 AS score
-                    FROM docs
-                    WHERE (title LIKE ? OR content LIKE ?)
-                    LIMIT ?
-                """
-                cursor.execute(sql, (like_query, like_query, remaining))
-                
-            fallback_results = [dict(row) for row in cursor.fetchall()]
-            results.extend(fallback_results)
-            print(f"[SEARCH] LIKE fallback found {len(fallback_results)} additional results")
+        # TIER 2: LIKE fallback (always runs)
+        like_query = f"%{query}%"
+        print(f"[SEARCH] T2-LIKE: {like_query!r}")
         
-        # Layer 3: Fuzzy search if still thin (handles typos like 'devopssct' -> 'devopsct')
-        if len(results) < limit * 0.5:
-            remaining = limit - len(results)
-            exclude_urls = {r["url"] for r in results}
-            fuzzy_results = self._fuzzy_search_tokens(query, limit=remaining)
-            fuzzy_results = [r for r in fuzzy_results if r["url"] not in exclude_urls]
-            
-            if fuzzy_results:
-                print(f"[SEARCH] Fuzzy search found {len(fuzzy_results)} results (typo-tolerant)")
-                results.extend(fuzzy_results)
-            
-        print(f"[SEARCH] Query: {query} → {len(results)} results")
+        cursor.execute(
+            """
+            SELECT id, url, title, substr(content, 1, 300) AS snippet, 0.0 AS score
+            FROM docs
+            WHERE content LIKE ?
+            LIMIT ?
+            """,
+            (like_query, limit),
+        )
+        results = [dict(row) for row in cursor.fetchall()]
+        print(f"[SEARCH] T2-LIKE found {len(results)}")
+        
+        if results:
+            return results
+        
+        # TIER 3: Last resort — recent docs (ALWAYS returns something)
+        print(f"[SEARCH] T3-RECENT fallback")
+        cursor.execute(
+            """
+            SELECT id, url, title, substr(content, 1, 300) AS snippet, 0.0 AS score
+            FROM docs
+            ORDER BY scraped_at DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        results = [dict(row) for row in cursor.fetchall()]
+        print(f"[SEARCH] T3-RECENT found {len(results)}")
+        
         return results
+
 
     def search_and_get(self, query: str, limit: int = 5, snippet_length: int = 400) -> List[Dict]:
         results = self.search_docs(query, limit=limit)

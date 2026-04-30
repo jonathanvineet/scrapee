@@ -159,21 +159,19 @@ class WebScraper:
         return url
 
     def _extract_content(self, soup: BeautifulSoup) -> str:
-        """🔥 CRITICAL FIX: Always extract text, fallback to raw if needed."""
-        # Try structured extraction first
-        main = soup.find("main") or soup.find("article") or soup.body or soup
-        text = main.get_text("\n", strip=True)
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        text = re.sub(r"[ \t]{2,}", " ", text)
-        text = text.strip()
+        """🔥 RULE 2: Universal extraction — NEVER FAIL."""
+        # Remove garbage tags
+        for tag in soup(["script", "style", "nav", "footer", "header"]):
+            tag.decompose()
         
-        # If extraction yielded nothing or too little, get raw soup text
-        if not text or len(text) < 50:
-            text = soup.get_text(" ", strip=True)
+        # Primary extraction
+        text = soup.get_text(" ", strip=True)
         
         content = text.lower() if text else ""
         print(f"[EXTRACT] Content length: {len(content)} chars")
         return content
+
+
 
     def _extract_links(self, source_url: str, soup: BeautifulSoup) -> List[str]:
         links: List[str] = []
