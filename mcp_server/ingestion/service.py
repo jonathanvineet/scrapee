@@ -32,7 +32,7 @@ class IngestionService:
         persisted_docs = []
         code_resources = []
         for page in crawl_result["pages"]:
-            saved = self.storeupsert_document(
+            saved = self.storupsert_document(
                 uri=str(page["uri"]),
                 source_url=str(page["source_url"]),
                 title=str(page["title"]),

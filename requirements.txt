@@ -1,3 +1,7 @@
 # Vercel Python runtime looks for dependencies at the project root.
 # Keep backend dependencies in one place.
 -r backend/requirements.txt
+
+# CLI building (optional, for developers)
+PyInstaller>=6.0.0
+requests>=2.28.0
