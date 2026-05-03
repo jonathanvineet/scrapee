@@ -469,6 +469,26 @@ class MCPServer:
                         },
                     },
                     {
+                        "name": "report_feedback",
+                        "description": (
+                            "🧠 SELF-LEARNING: Report whether the provided context was helpful.\n"
+                            "This helps the MCP learn which sources are best for which queries.\n"
+                            "Call this after answering to teach the system.\n"
+                            "\n"
+                            "success=true: The context led to a good answer\n"
+                            "success=false: The context was unhelpful or the user re-asked\n"
+                        ),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "query": {"type": "string", "description": "The original query"},
+                                "sources": {"type": "array", "items": {"type": "string"}, "description": "List of URLs that were provided"},
+                                "success": {"type": "boolean", "description": "True if helpful, False if not"},
+                            },
+                            "required": ["query", "sources", "success"],
+                        },
+                    },
+                    {
                         "name": "scrape_url",
                         "description": (
                             "Fetch and index documentation from a URL. Use when a required document is "
@@ -503,6 +523,7 @@ class MCPServer:
 
         tools = {
             "get_context": self._tool_get_context,
+            "report_feedback": self._tool_report_feedback,
             "scrape_url": self._tool_scrape_url,
         }
 
@@ -1323,8 +1344,8 @@ class MCPServer:
         ])
         return list(variations)
 
-    def _rank_sources(self, results: List[Dict], intent: str = "general") -> List[Dict]:
-        """🧠 COGNITIVE #4: Rank sources based on intent + authority.
+    def _rank_sources(self, results: List[Dict], intent: str = "general", query: str = "") -> List[Dict]:
+        """🧠 ADAPTIVE RANKING: Intent + Authority + Learned Preferences.
         
         Different intents = different source preferences:
         - 'debug': StackOverflow + GitHub (real solutions)
@@ -1333,8 +1354,10 @@ class MCPServer:
         - 'concept': Conceptual docs + explanations
         - 'general': Default ranking (all sources equal)
         
+        NOW ADAPTIVE: Blends intent + learned scores from feedback
         Official docs > developer guides > blogs > random pages
         Recent docs get +0.5 boost.
+        Learned scores: +0 to +4 based on historical success.
         """
         def score(result):
             url = result.get("url", "").lower()
@@ -1402,7 +1425,18 @@ class MCPServer:
             if result.get("scraped_at"):
                 base_score += 0.5
             
-            return base_score
+            # ADAPTIVE: Inject learned scores from feedback history
+            learned_source_score = self.store.get_source_score(result.get("url", ""))
+            adaptive_boost = (learned_source_score - 1.0)  # -0.9 to +4 boost
+            
+            # Query-specific affinity (if this source helped with similar queries)
+            if query:
+                query_affinity = self.store.get_query_source_affinity(query, result.get("url", ""))
+                adaptive_boost += (query_affinity * 0.1)  # +0.1 per success
+            
+            final_score = base_score + adaptive_boost
+            
+            return max(0.1, final_score)  # Never go below 0.1
         
         return sorted(results, key=score, reverse=True)
 
@@ -1505,9 +1539,9 @@ class MCPServer:
         deduped = self._dedupe_results(all_results)
         print(f"[COGNITIVE] Deduped: {len(all_results)} → {len(deduped)} results")
 
-        # COGNITIVE LAYER 5: Rank by authority + intent
-        ranked = self._rank_sources(deduped, intent)
-        print(f"[COGNITIVE] Ranked by authority ({intent} intent)")
+        # COGNITIVE LAYER 5: Rank by authority + intent + LEARNED SCORES
+        ranked = self._rank_sources(deduped, intent, query)
+        print(f"[COGNITIVE] Ranked by authority ({intent} intent) + learned preferences")
 
         # COGNITIVE LAYER 6: Diversify source types (docs/github/community)
         diversified = self._diversify_sources(ranked)
@@ -1534,6 +1568,39 @@ class MCPServer:
         
         self.cache.set(cache_key, response, ttl=3600)
         return response
+
+    def _tool_report_feedback(self, args: Dict) -> Dict:
+        """🧠 SELF-LEARNING: Accept feedback to train source ranking.
+        
+        This tool allows Copilot to report whether the provided context
+        led to a good answer, teaching the MCP which sources to prioritize.
+        
+        After each usage, Copilot should call this with:
+        - query: Original query
+        - sources: URLs that were provided
+        - success: True if helpful, False if not
+        """
+        query = args.get("query", "").strip()
+        sources = args.get("sources", [])
+        success = args.get("success", False)
+        
+        if not query or not sources:
+            return {"status": "error", "message": "query and sources required"}
+        
+        try:
+            self.store.record_source_feedback(query, sources, success)
+            
+            action = "boosted" if success else "demoted"
+            return {
+                "status": "learned",
+                "message": f"Updated {len(sources)} sources ({action})",
+                "query": query,
+                "sources_updated": len(sources),
+                "feedback": "success" if success else "failure"
+            }
+        except Exception as e:
+            print(f"[LEARNING ERROR] Failed to record feedback: {e}")
+            return {"status": "error", "message": str(e)}
 
     def _normalize_special_urls(self, url: str) -> str:
         """FIX #2: Normalize special URLs for content extraction.

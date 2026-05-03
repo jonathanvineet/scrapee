@@ -160,7 +160,8 @@ class SQLiteStore:
                 domain TEXT,
                 language TEXT,
                 scraped_at TEXT,
-                metadata TEXT
+                metadata TEXT,
+                score REAL DEFAULT 1.0
             );
 
             CREATE TABLE IF NOT EXISTS code_blocks (
@@ -183,6 +184,14 @@ class SQLiteStore:
                 FOREIGN KEY (doc_id) REFERENCES docs(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS query_source_map (
+                query TEXT NOT NULL,
+                url TEXT NOT NULL,
+                success_count INTEGER DEFAULT 0,
+                failure_count INTEGER DEFAULT 0,
+                PRIMARY KEY (query, url)
+            );
+
             CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts
             USING fts5(title, content, url UNINDEXED, tokenize='porter unicode61');
 
@@ -192,6 +201,7 @@ class SQLiteStore:
             CREATE INDEX IF NOT EXISTS idx_docs_url ON docs(url);
             CREATE INDEX IF NOT EXISTS idx_docs_domain ON docs(domain);
             CREATE INDEX IF NOT EXISTS idx_docs_scraped_at ON docs(scraped_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_docs_score ON docs(score DESC);
             CREATE INDEX IF NOT EXISTS idx_code_doc_id ON code_blocks(doc_id);
             CREATE INDEX IF NOT EXISTS idx_code_language ON code_blocks(language);
             CREATE INDEX IF NOT EXISTS idx_topics_doc_id ON doc_topics(doc_id);
@@ -1273,6 +1283,72 @@ class SQLiteStore:
             "docs": [dict(row) for row in docs],
             "code_blocks": [dict(row) for row in code_blocks]
         }
+
+    def record_source_feedback(self, query: str, urls: List[str], success: bool) -> None:
+        """🧠 SELF-LEARNING #1: Record feedback for sources used in a response.
+        
+        Updates both source scores and query-source mapping to learn what works.
+        
+        Args:
+            query: User's original query
+            urls: List of source URLs that were returned
+            success: True if user accepted/used answer, False if they rejected/re-asked
+        """
+        delta = 0.2 if success else -0.2
+        
+        cursor = self.conn.cursor()
+        
+        for url in urls:
+            # Update source score (learned preference)
+            cursor.execute("""
+                UPDATE docs 
+                SET score = MAX(0.1, MIN(5.0, score + ?))
+                WHERE url = ?
+            """, (delta, url))
+            
+            # Record query-source mapping (for personalization)
+            action = "INSERT OR IGNORE" if success else "INSERT"
+            if success:
+                cursor.execute("""
+                    INSERT INTO query_source_map (query, url, success_count) 
+                    VALUES (?, ?, 1)
+                    ON CONFLICT(query, url) DO UPDATE SET success_count = success_count + 1
+                """, (query, url))
+            else:
+                cursor.execute("""
+                    INSERT INTO query_source_map (query, url, failure_count)
+                    VALUES (?, ?, 1)
+                    ON CONFLICT(query, url) DO UPDATE SET failure_count = failure_count + 1
+                """, (query, url))
+        
+        self.conn.commit()
+        print(f"[LEARNING] Updated scores for {len(urls)} sources (success={success})")
+
+    def get_source_score(self, url: str) -> float:
+        """🧠 SELF-LEARNING #2: Get learned score for a source.
+        
+        Returns the adaptive score for a URL based on historical performance.
+        Defaults to 1.0 if URL not found.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT score FROM docs WHERE url = ?", (url,))
+        row = cursor.fetchone()
+        return row["score"] if row else 1.0
+
+    def get_query_source_affinity(self, query: str, url: str) -> int:
+        """🧠 SELF-LEARNING #3: Check if this source has helped with this query before.
+        
+        Returns success_count - failure_count (positive = good source for this query).
+        Used for personalizing results based on history.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT success_count - failure_count as affinity 
+            FROM query_source_map 
+            WHERE query = ? AND url = ?
+        """, (query, url))
+        row = cursor.fetchone()
+        return row["affinity"] if row else 0
 
     def close(self):
         """Close database connection."""
