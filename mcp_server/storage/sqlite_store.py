@@ -77,6 +77,28 @@ class SQLiteStore:
             END;
         """)
         self.conn.commit()
+        # --- Migration: ensure adaptive MCP columns/tables exist ---
+        try:
+            # Add learned score to docs (if not present)
+            self.conn.execute("ALTER TABLE docs ADD COLUMN score REAL DEFAULT 1.0")
+        except Exception:
+            # Column already exists or cannot be altered on this SQLite build
+            pass
+
+        try:
+            # Per-query source mapping for personalization / affinity
+            self.conn.executescript("""
+                CREATE TABLE IF NOT EXISTS query_source_map (
+                    query TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    success_count INTEGER DEFAULT 0,
+                    failure_count INTEGER DEFAULT 0,
+                    PRIMARY KEY (query, url)
+                );
+            """)
+        except Exception:
+            pass
+        self.conn.commit()
 
     # ─── Cache helpers ────────────────────────────────────────────────────────
 
@@ -150,11 +172,12 @@ class SQLiteStore:
                     d.url,
                     d.title,
                     snippet(docs_fts, 1, '[', ']', '...', 30) AS snippet,
+                    d.score AS learned_score,
                     rank
                 FROM docs d
                 JOIN docs_fts ON d.id = docs_fts.rowid
                 WHERE docs_fts MATCH ?
-                ORDER BY rank
+                ORDER BY learned_score DESC, rank
                 LIMIT ?
             """, (query, limit)).fetchall()
             result = [dict(r) for r in rows]
@@ -177,24 +200,24 @@ class SQLiteStore:
                     SELECT
                         c.id, c.doc_id, c.language, c.code,
                         snippet(code_fts, 0, '[', ']', '...', 20) AS snippet,
-                        d.url, d.title, rank
+                        d.url, d.title, d.score AS learned_score, rank
                     FROM code_blocks c
                     JOIN code_fts ON c.id = code_fts.rowid
                     JOIN docs d ON c.doc_id = d.id
                     WHERE code_fts MATCH ? AND c.language = ?
-                    ORDER BY rank LIMIT ?
+                    ORDER BY learned_score DESC, rank LIMIT ?
                 """, (query, language, limit)).fetchall()
             else:
                 rows = self.conn.execute("""
                     SELECT
                         c.id, c.doc_id, c.language, c.code,
                         snippet(code_fts, 0, '[', ']', '...', 20) AS snippet,
-                        d.url, d.title, rank
+                        d.url, d.title, d.score AS learned_score, rank
                     FROM code_blocks c
                     JOIN code_fts ON c.id = code_fts.rowid
                     JOIN docs d ON c.doc_id = d.id
                     WHERE code_fts MATCH ?
-                    ORDER BY rank LIMIT ?
+                    ORDER BY learned_score DESC, rank LIMIT ?
                 """, (query, limit)).fetchall()
 
             result = [dict(r) for r in rows]
@@ -242,3 +265,55 @@ class SQLiteStore:
             return {"total_docs": doc_count, "total_code_blocks": code_count}
         except Exception as e:
             return {"total_docs": 0, "total_code_blocks": 0, "error": str(e)}
+
+    def record_source_feedback(self, query: str, urls: list, success: bool) -> None:
+        """Record implicit feedback about which sources helped for a query.
+
+        Args:
+            query: original user query (may be empty)
+            urls: list of source URLs
+            success: True if the user accepted the answer, False if they retried
+        """
+        delta = 0.2 if success else -0.2
+        cursor = self.conn.cursor()
+        for url in urls:
+            try:
+                cursor.execute(
+                    """
+                    UPDATE docs
+                    SET score = MAX(0.1, MIN(5.0, COALESCE(score, 1.0) + ?))
+                    WHERE url = ?
+                    """,
+                    (delta, url),
+                )
+
+                if success:
+                    cursor.execute(
+                        """
+                        INSERT INTO query_source_map (query, url, success_count)
+                        VALUES (?, ?, 1)
+                        ON CONFLICT(query, url) DO UPDATE SET success_count = success_count + 1
+                        """,
+                        (query, url),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        INSERT INTO query_source_map (query, url, failure_count)
+                        VALUES (?, ?, 1)
+                        ON CONFLICT(query, url) DO UPDATE SET failure_count = failure_count + 1
+                        """,
+                        (query, url),
+                    )
+            except Exception:
+                # Ignore single-row failures to keep feedback non-blocking
+                continue
+        self.conn.commit()
+
+    def get_source_score(self, url: str) -> float:
+        """Return learned score for a source URL (defaults to 1.0)."""
+        try:
+            row = self.conn.execute("SELECT score FROM docs WHERE url = ?", (url,)).fetchone()
+            return float(row[0]) if row and row[0] is not None else 1.0
+        except Exception:
+            return 1.0

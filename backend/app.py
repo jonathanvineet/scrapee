@@ -378,6 +378,33 @@ def mcp():
     return jsonify(response), 200
 
 
+@app.route("/api/mcp/feedback", methods=["POST", "OPTIONS"])
+def mcp_feedback():
+    """Accept implicit feedback from the frontend about which sources helped.
+
+    Body: { "query": "...", "sources": ["https://..."], "success": true }
+    """
+    if request.method == "OPTIONS":
+        return "", 204
+
+    try:
+        data = request.get_json() or {}
+        sources = data.get("sources", []) or []
+        success = bool(data.get("success", True))
+        query = data.get("query", "") or ""
+
+        store = get_sqlite_store()
+        # Non-blocking: record feedback and return
+        try:
+            store.record_source_feedback(query, sources, success)
+        except Exception as e:
+            app.logger.warning(f"Feedback recording failed: {e}")
+
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
 # ─── SERVERLESS MCP: BACKGROUND SCRAPE ENDPOINT (NON-BLOCKING) ───────────────
 @app.route("/api/internal/background_scrape", methods=["POST"])
 def background_scrape():

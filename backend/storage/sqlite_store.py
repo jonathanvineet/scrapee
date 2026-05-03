@@ -675,18 +675,40 @@ class SQLiteStore:
         try:
             cursor.execute(
                 """
-                SELECT id, url, title,
+                SELECT d.id, d.url, d.title,
                        snippet(docs_fts, 1, '[', ']', '...', 32) AS snippet,
-                       bm25(docs_fts) AS score
+                       bm25(docs_fts) AS fts_score,
+                       d.score AS learned_score
                 FROM docs_fts
+                JOIN docs d ON docs_fts.rowid = d.id
                 WHERE docs_fts MATCH ?
                 LIMIT ?
                 """,
                 (fts_query, limit),
             )
-            results = [dict(row) for row in cursor.fetchall()]
-            print(f"[SEARCH] T1-FTS found {len(results)}")
-            
+            rows = [dict(row) for row in cursor.fetchall()]
+            print(f"[SEARCH] T1-FTS found {len(rows)}")
+
+            results = []
+            for r in rows:
+                fts = float(r.get("fts_score") or 0.0)
+                learned = float(r.get("learned_score") or 1.0)
+                # Combine scores: learned score + inverted fts similarity
+                combined = learned + (1.0 / (fts + 1.0))
+                # Query-source affinity boost
+                try:
+                    affinity = self.get_query_source_affinity(query, r.get("url"))
+                    if affinity > 0:
+                        combined += 0.5
+                except Exception:
+                    pass
+
+                r["final_score"] = combined
+                results.append(r)
+
+            # Sort by combined score descending
+            results.sort(key=lambda x: x.get("final_score", 0.0), reverse=True)
+
             if results:
                 return results
         except Exception as e:
@@ -698,33 +720,62 @@ class SQLiteStore:
         
         cursor.execute(
             """
-            SELECT id, url, title, substr(content, 1, 300) AS snippet, 0.0 AS score
+            SELECT id, url, title, substr(content, 1, 300) AS snippet, score AS learned_score
             FROM docs
             WHERE content LIKE ?
             LIMIT ?
             """,
             (like_query, limit),
         )
-        results = [dict(row) for row in cursor.fetchall()]
-        print(f"[SEARCH] T2-LIKE found {len(results)}")
-        
-        if results:
+        rows = [dict(row) for row in cursor.fetchall()]
+        print(f"[SEARCH] T2-LIKE found {len(rows)}")
+
+        if rows:
+            results = []
+            for r in rows:
+                learned = float(r.get("learned_score") or 1.0)
+                # LIKE fallback has no fts_score; use learned as primary
+                combined = learned
+                try:
+                    affinity = self.get_query_source_affinity(query, r.get("url"))
+                    if affinity > 0:
+                        combined += 0.5
+                except Exception:
+                    pass
+                r["final_score"] = combined
+                results.append(r)
+
+            results.sort(key=lambda x: x.get("final_score", 0.0), reverse=True)
             return results
         
         # TIER 3: Last resort — recent docs (ALWAYS returns something)
         print(f"[SEARCH] T3-RECENT fallback")
         cursor.execute(
             """
-            SELECT id, url, title, substr(content, 1, 300) AS snippet, 0.0 AS score
+            SELECT id, url, title, substr(content, 1, 300) AS snippet, score AS learned_score
             FROM docs
             ORDER BY scraped_at DESC, id DESC
             LIMIT ?
             """,
             (limit,),
         )
-        results = [dict(row) for row in cursor.fetchall()]
-        print(f"[SEARCH] T3-RECENT found {len(results)}")
-        
+        rows = [dict(row) for row in cursor.fetchall()]
+        print(f"[SEARCH] T3-RECENT found {len(rows)}")
+
+        results = []
+        for r in rows:
+            learned = float(r.get("learned_score") or 1.0)
+            combined = learned
+            try:
+                affinity = self.get_query_source_affinity(query, r.get("url"))
+                if affinity > 0:
+                    combined += 0.5
+            except Exception:
+                pass
+            r["final_score"] = combined
+            results.append(r)
+
+        results.sort(key=lambda x: x.get("final_score", 0.0), reverse=True)
         return results
 
 
