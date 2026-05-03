@@ -1207,33 +1207,34 @@ class MCPServer:
         """
         def score(result):
             url = result.get("url", "").lower()
+            base_score = 1
             
             # Official docs domains (highest priority)
             if "docs." in url or "/documentation/" in url or "official" in url:
-                return 10
-            if "readthedocs.io" in url or ".readthedocs.io" in url:
-                return 9
-            if "developer." in url or "/developers/" in url or "dev.to" in url:
-                return 8
-            
+                base_score = 10
+            elif "readthedocs.io" in url or ".readthedocs.io" in url:
+                base_score = 9
+            elif "developer." in url or "/developers/" in url or "dev.to" in url:
+                base_score = 8
             # Code repositories
-            if "github.com" in url or "gitlab.com" in url:
-                return 6
-            
+            elif "github.com" in url or "gitlab.com" in url:
+                base_score = 6
             # Q&A / Communities
-            if "stackoverflow.com" in url:
-                return 5
-            if "reddit.com" in url:
-                return 4
-            
+            elif "stackoverflow.com" in url:
+                base_score = 5
+            elif "reddit.com" in url:
+                base_score = 4
             # Blogs (lower priority)
-            if "medium.com" in url or "blog" in url or "article" in url:
-                return 3
-            if "dev.to" in url or "hashnode.com" in url:
-                return 3
+            elif "medium.com" in url or "blog" in url or "article" in url:
+                base_score = 3
+            elif "dev.to" in url or "hashnode.com" in url:
+                base_score = 3
             
-            # Default (other sources)
-            return 1
+            # Boost recent docs (favor fresh content)
+            if result.get("scraped_at"):
+                base_score += 0.5
+            
+            return base_score
         
         return sorted(results, key=score, reverse=True)
 
@@ -1248,28 +1249,40 @@ class MCPServer:
                 seen.add(url)
         return deduped
 
-    def _format_context_for_copilot(self, results: List[Dict]) -> str:
-        """🧠 INTELLIGENCE #4: Format results for LLM consumption.
+    def _merge_context(self, results: List[Dict]) -> str:
+        """🧠 INTELLIGENCE #4 (FINAL): Context synthesis layer.
         
-        Returns clean, structured context that Copilot can use directly.
-        Format: [SOURCE: url]\\nsnippet\\n---\\n[SOURCE: url2]\\nsnippet2
+        Merges individual snippets into ONE clean context block.
+        This transforms from "search engine returning results" → "knowledge interface returning context".
+        
+        Returns merged context that Copilot can use directly without further processing.
         """
-        blocks = []
+        merged = []
+        seen_chunks = set()
         
-        for result in results[:5]:  # Top 5 sources only
-            url = result.get("url", "unknown")
-            title = result.get("title", "")
-            snippet = result.get("snippet", "")
+        for r in results:
+            text = (r.get("snippet") or "").strip()
+            if not text:
+                continue
             
-            # Build source block
-            source_line = f"[SOURCE: {url}]"
-            if title:
-                source_line += f" ({title})"
+            # Dedupe similar chunks (first 100 chars as key)
+            key = text[:100]
+            if key in seen_chunks:
+                continue
+            seen_chunks.add(key)
             
-            block = f"{source_line}\\n{snippet}"
-            blocks.append(block)
+            merged.append(text)
         
-        return "\\n\\n---\\n\\n".join(blocks)
+        # Return top 5 merged, joined with clear separation
+        return "\n\n".join(merged[:5])
+
+    def _format_context_for_copilot(self, results: List[Dict]) -> str:
+        """DEPRECATED: Use _merge_context() instead for final transform.
+        
+        This method is kept for backward compatibility.
+        New approach: Context synthesis into clean knowledge block via _merge_context().
+        """
+        return self._merge_context(results)
 
     # ------------------------------------------------------------------ #
     # answer — MASTER TOOL (ensure context + retrieve)                    #
@@ -1336,12 +1349,13 @@ class MCPServer:
         ranked = self._rank_sources(deduped)
         print(f"[INTELLIGENCE] Ranked by authority")
 
-        # STEP 5: Format for Copilot
-        context_str = self._format_context_for_copilot(ranked)
+        # STEP 5: CONTEXT SYNTHESIS (NEW: Merge into clean knowledge)
+        merged_context = self._merge_context(ranked)
+        print(f"[INTELLIGENCE] Merged context from {len(ranked)} sources")
         
         response = {
             "status": "ready",
-            "context": context_str,
+            "context": merged_context,
             "sources": [r.get("url") for r in ranked[:5]],
             "count": len(ranked)
         }
