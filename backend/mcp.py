@@ -1185,6 +1185,127 @@ class MCPServer:
     # INTELLIGENCE LAYER — Query expansion, ranking, formatting       #
     # ================================================================ #
 
+    def _classify_intent(self, query: str) -> str:
+        """🧠 COGNITIVE #1: Classify user intent to route intelligence.
+        
+        Detects what type of question this is:
+        - 'debug': Error, exception, traceback → Route to StackOverflow, GitHub
+        - 'tutorial': How-to, build, create → Route to docs, guides
+        - 'concept': What is, explain → Route to conceptual docs
+        - 'reference': API, method, function → Route to official reference
+        - 'general': Unclassified → Use default ranking
+        
+        This enables intent-aware ranking and context structuring.
+        """
+        q = query.lower()
+        
+        if any(word in q for word in ["error", "exception", "traceback", "debug", "fix", "issue", "problem"]):
+            return "debug"
+        
+        if any(word in q for word in ["how", "build", "create", "setup", "install", "configure", "implement"]):
+            return "tutorial"
+        
+        if any(word in q for word in ["what is", "explain", "understand", "concept", "definition"]):
+            return "concept"
+        
+        if any(word in q for word in ["api", "reference", "method", "function", "parameter", "argument"]):
+            return "reference"
+        
+        return "general"
+
+    def _diversify_sources(self, results: List[Dict]) -> List[Dict]:
+        """🧠 COGNITIVE #2: Diversify source types for human-like understanding.
+        
+        Instead of just returning top 5, balance across source types:
+        - Official docs (authoritative)
+        - GitHub/code (real implementation)
+        - Community (real-world explanation)
+        
+        This ensures Copilot gets multiple perspectives, not just one angle.
+        """
+        buckets = {
+            "docs": [],
+            "github": [],
+            "community": []
+        }
+        
+        for r in results:
+            url = r.get("url", "").lower()
+            
+            if "docs." in url or "/documentation/" in url or "official" in url:
+                buckets["docs"].append(r)
+            elif "github.com" in url or "gitlab.com" in url:
+                buckets["github"].append(r)
+            else:
+                buckets["community"].append(r)
+        
+        # Balance: 2 docs, 2 github, 1 community for comprehensive view
+        return (
+            buckets["docs"][:2] +
+            buckets["github"][:2] +
+            buckets["community"][:1]
+        )
+
+    def _structure_context_by_intent(self, results: List[Dict], intent: str) -> str:
+        """🧠 COGNITIVE #3: Structure knowledge by intent for clarity.
+        
+        Instead of random text blob, organize into sections that match
+        how humans think about the topic based on their intent:
+        
+        - 'debug': ERROR/CAUSE/SOLUTION structure
+        - 'tutorial': CONCEPT/STEPS/EXAMPLES structure
+        - 'reference': SIGNATURE/PARAMETERS/EXAMPLES structure
+        - 'concept': DEFINITION/WHY/WHEN structure
+        - 'general': CONCEPT/STEPS/EXAMPLES structure
+        """
+        if intent == "debug":
+            sections = {"error": [], "cause": [], "solution": []}
+            for r in results:
+                text = (r.get("snippet") or "").strip()
+                if any(word in text.lower() for word in ["error", "exception", "traceback"]):
+                    sections["error"].append(text)
+                elif any(word in text.lower() for word in ["because", "due to", "cause", "reason"]):
+                    sections["cause"].append(text)
+                else:
+                    sections["solution"].append(text)
+            return f"[ERROR]\n{sections['error'][0] if sections['error'] else 'N/A'}\n\n[CAUSE]\n{sections['cause'][0] if sections['cause'] else 'N/A'}\n\n[SOLUTION]\n{chr(10).join(sections['solution'][:2]) if sections['solution'] else 'Check documentation'}"
+        
+        elif intent == "reference":
+            sections = {"signature": [], "parameters": [], "examples": []}
+            for r in results:
+                text = (r.get("snippet") or "").strip()
+                if "(" in text and ")" in text:
+                    sections["signature"].append(text)
+                elif "param" in text.lower() or "argument" in text.lower():
+                    sections["parameters"].append(text)
+                elif "example" in text.lower() or "def " in text or "import " in text:
+                    sections["examples"].append(text)
+            return f"[SIGNATURE]\n{sections['signature'][0] if sections['signature'] else 'N/A'}\n\n[PARAMETERS]\n{sections['parameters'][0] if sections['parameters'] else 'N/A'}\n\n[EXAMPLES]\n{chr(10).join(sections['examples'][:2]) if sections['examples'] else 'N/A'}"
+        
+        elif intent == "concept":
+            sections = {"definition": [], "why": [], "when": []}
+            for r in results:
+                text = (r.get("snippet") or "").strip()
+                if "is" in text.lower() or "defined" in text.lower():
+                    sections["definition"].append(text)
+                elif any(word in text.lower() for word in ["because", "allow", "enable", "why"]):
+                    sections["why"].append(text)
+                else:
+                    sections["when"].append(text)
+            return f"[DEFINITION]\n{sections['definition'][0] if sections['definition'] else 'N/A'}\n\n[WHY USE]\n{sections['why'][0] if sections['why'] else 'N/A'}\n\n[WHEN TO USE]\n{sections['when'][0] if sections['when'] else 'N/A'}"
+        
+        else:  # tutorial or general
+            sections = {"concept": [], "steps": [], "examples": []}
+            for r in results:
+                text = (r.get("snippet") or "").strip()
+                if "def " in text or "import " in text or "(" in text:
+                    sections["examples"].append(text)
+                elif any(word in text.lower() for word in ["step", "first", "then", "next", "finally"]):
+                    sections["steps"].append(text)
+                else:
+                    sections["concept"].append(text)
+            return f"[CONCEPT]\n{chr(10).join(sections['concept'][:2]) if sections['concept'] else 'N/A'}\n\n[STEPS]\n{chr(10).join(sections['steps'][:2]) if sections['steps'] else 'N/A'}\n\n[EXAMPLES]\n{chr(10).join(sections['examples'][:2]) if sections['examples'] else 'N/A'}"
+
     def _expand_query(self, query: str) -> List[str]:
         """🧠 INTELLIGENCE #1: Expand queries for better coverage.
         
@@ -1202,44 +1323,80 @@ class MCPServer:
         ])
         return list(variations)
 
-    def _rank_sources(self, results: List[Dict]) -> List[Dict]:
-        """🧠 INTELLIGENCE #2: Rank sources by authority.
+    def _rank_sources(self, results: List[Dict], intent: str = "general") -> List[Dict]:
+        """🧠 COGNITIVE #4: Rank sources based on intent + authority.
+        
+        Different intents = different source preferences:
+        - 'debug': StackOverflow + GitHub (real solutions)
+        - 'tutorial': Docs + guides (structured learning)
+        - 'reference': Official docs + API refs (authoritative)
+        - 'concept': Conceptual docs + explanations
+        - 'general': Default ranking (all sources equal)
         
         Official docs > developer guides > blogs > random pages
-        
-        Scoring:
-        - Official docs: 10
-        - ReadTheDocs: 9
-        - Developer guide: 8
-        - GitHub: 6
-        - StackOverflow: 5
-        - Blog/Medium: 3
-        - Other: 1
+        Recent docs get +0.5 boost.
         """
         def score(result):
             url = result.get("url", "").lower()
             base_score = 1
             
-            # Official docs domains (highest priority)
-            if "docs." in url or "/documentation/" in url or "official" in url:
-                base_score = 10
-            elif "readthedocs.io" in url or ".readthedocs.io" in url:
-                base_score = 9
-            elif "developer." in url or "/developers/" in url or "dev.to" in url:
-                base_score = 8
-            # Code repositories
-            elif "github.com" in url or "gitlab.com" in url:
-                base_score = 6
-            # Q&A / Communities
-            elif "stackoverflow.com" in url:
-                base_score = 5
-            elif "reddit.com" in url:
-                base_score = 4
-            # Blogs (lower priority)
-            elif "medium.com" in url or "blog" in url or "article" in url:
-                base_score = 3
-            elif "dev.to" in url or "hashnode.com" in url:
-                base_score = 3
+            # Intent-specific boosting
+            if intent == "reference":
+                if "docs." in url or "/documentation/" in url or "/api" in url:
+                    base_score = 10
+                elif "readthedocs.io" in url:
+                    base_score = 9
+                elif "developer." in url:
+                    base_score = 8
+            
+            elif intent == "debug":
+                if "stackoverflow.com" in url:
+                    base_score = 10
+                elif "github.com" in url or "github.com/issues" in url:
+                    base_score = 9
+                elif "readthedocs.io" in url:
+                    base_score = 5
+                else:
+                    base_score = 2
+            
+            elif intent == "tutorial":
+                if "readthedocs.io" in url or "/guide" in url or "/tutorial" in url:
+                    base_score = 10
+                elif "docs." in url:
+                    base_score = 9
+                elif "github.com" in url:
+                    base_score = 6
+                else:
+                    base_score = 3
+            
+            elif intent == "concept":
+                if "docs." in url or "/documentation/" in url:
+                    base_score = 10
+                elif "readthedocs.io" in url:
+                    base_score = 9
+                elif "developer." in url or "explanation" in url:
+                    base_score = 8
+                else:
+                    base_score = 2
+            
+            else:  # general intent
+                # Default ranking
+                if "docs." in url or "/documentation/" in url or "official" in url:
+                    base_score = 10
+                elif "readthedocs.io" in url or ".readthedocs.io" in url:
+                    base_score = 9
+                elif "developer." in url or "/developers/" in url or "dev.to" in url:
+                    base_score = 8
+                elif "github.com" in url or "gitlab.com" in url:
+                    base_score = 6
+                elif "stackoverflow.com" in url:
+                    base_score = 5
+                elif "reddit.com" in url:
+                    base_score = 4
+                elif "medium.com" in url or "blog" in url or "article" in url:
+                    base_score = 3
+                elif "dev.to" in url or "hashnode.com" in url:
+                    base_score = 3
             
             # Boost recent docs (favor fresh content)
             if result.get("scraped_at"):
@@ -1260,32 +1417,16 @@ class MCPServer:
                 seen.add(url)
         return deduped
 
-    def _merge_context(self, results: List[Dict]) -> str:
-        """🧠 INTELLIGENCE #4 (FINAL): Context synthesis layer.
+    def _merge_context(self, results: List[Dict], intent: str = "general") -> str:
+        """🧠 COGNITIVE #5: Merge context with intent-aware structuring.
         
-        Merges individual snippets into ONE clean context block.
-        This transforms from "search engine returning results" → "knowledge interface returning context".
-        
-        Returns merged context that Copilot can use directly without further processing.
+        Instead of random text blob, organize into semantic sections
+        based on the user's intent. This makes Copilot think clearly.
         """
-        merged = []
-        seen_chunks = set()
+        if not results:
+            return "No context available"
         
-        for r in results:
-            text = (r.get("snippet") or "").strip()
-            if not text:
-                continue
-            
-            # Dedupe similar chunks (first 100 chars as key)
-            key = text[:100]
-            if key in seen_chunks:
-                continue
-            seen_chunks.add(key)
-            
-            merged.append(text)
-        
-        # Return top 5 merged, joined with clear separation
-        return "\n\n".join(merged[:5])
+        return self._structure_context_by_intent(results, intent)
 
     def _format_context_for_copilot(self, results: List[Dict]) -> str:
         """DEPRECATED: Use _merge_context() instead for final transform.
@@ -1300,16 +1441,19 @@ class MCPServer:
     # ------------------------------------------------------------------ #
 
     def _tool_get_context(self, args: Dict) -> Dict:
-        """🧠 PRIMARY CONTEXT ENGINE WITH INTELLIGENCE.
+        """🧠 COGNITIVE ROUTING ENGINE — INSANE MODE.
         
-        Pipeline:
-        1. Expand query variations
-        2. Search all variations (with 3-tier fallback)
-        3. Deduplicate results
-        4. Rank by source authority
-        5. Format for Copilot
+        Complete pipeline with intent understanding and cognitive routing:
+        1. Classify intent (debug/tutorial/concept/reference/general)
+        2. Expand query variations (6x coverage)
+        3. Search all variations (3-tier fallback per query)
+        4. Deduplicate results (by URL)
+        5. Rank by authority + intent (intent-aware scoring)
+        6. Diversify sources (balance docs/github/community)
+        7. Structure by intent (CONCEPT/STEPS/EXAMPLES or ERROR/CAUSE/SOLUTION)
+        8. Return grounded, structured context
         
-        Returns clean, curated context ready for LLM.
+        This transforms from "retrieval" → "cognitive routing for AI"
         """
         query = args.get("query", "").strip()
         if not query:
@@ -1320,21 +1464,25 @@ class MCPServer:
         if cached:
             return cached
 
-        # STEP 1: Expand query for better coverage
-        query_variations = self._expand_query(query)
-        print(f"[INTELLIGENCE] Query expansions: {len(query_variations)} variations")
+        # COGNITIVE LAYER 1: Classify intent
+        intent = self._classify_intent(query)
+        print(f"[COGNITIVE] Intent: {intent}")
 
-        # STEP 2: Search with all variations
+        # COGNITIVE LAYER 2: Expand query for better coverage
+        query_variations = self._expand_query(query)
+        print(f"[COGNITIVE] Query expansions: {len(query_variations)} variations")
+
+        # COGNITIVE LAYER 3: Search with all variations
         all_results = []
         for q in query_variations:
             try:
                 results = self.store.search_docs(q, limit=5)
                 all_results.extend(results)
             except Exception as e:
-                print(f"[INTELLIGENCE] Search failed for '{q}': {e}")
+                print(f"[COGNITIVE] Search failed for '{q}': {e}")
 
         if not all_results:
-            print(f"[INTELLIGENCE] No results from variations, trying live scrape")
+            print(f"[COGNITIVE] No results from variations, trying live scrape")
             # Trigger background scrape
             try:
                 import requests
@@ -1349,27 +1497,33 @@ class MCPServer:
             return {
                 "status": "learning",
                 "context": f"Fetching documentation for '{query}'...",
-                "sources": []
+                "sources": [],
+                "intent": intent
             }
 
-        # STEP 3: Deduplicate by URL
+        # COGNITIVE LAYER 4: Deduplicate by URL
         deduped = self._dedupe_results(all_results)
-        print(f"[INTELLIGENCE] Deduped: {len(all_results)} → {len(deduped)} results")
+        print(f"[COGNITIVE] Deduped: {len(all_results)} → {len(deduped)} results")
 
-        # STEP 4: Rank by source authority
-        ranked = self._rank_sources(deduped)
-        print(f"[INTELLIGENCE] Ranked by authority")
+        # COGNITIVE LAYER 5: Rank by authority + intent
+        ranked = self._rank_sources(deduped, intent)
+        print(f"[COGNITIVE] Ranked by authority ({intent} intent)")
 
-        # STEP 5: CONTEXT SYNTHESIS (NEW: Merge into clean knowledge)
-        merged_context = self._merge_context(ranked)
-        print(f"[INTELLIGENCE] Merged context from {len(ranked)} sources")
+        # COGNITIVE LAYER 6: Diversify source types (docs/github/community)
+        diversified = self._diversify_sources(ranked)
+        print(f"[COGNITIVE] Diversified: {len(ranked)} → {len(diversified)} balanced sources")
+
+        # COGNITIVE LAYER 7: Structure context by intent
+        merged_context = self._merge_context(diversified, intent)
+        print(f"[COGNITIVE] Merged context with {intent}-based structure")
         
-        # Build dependency injection response with psychological forcing
+        # Build response with cognitive routing metadata
         response = {
             "status": "ready",
+            "intent": intent,
             "context": merged_context,
-            "sources": [r.get("url") for r in ranked[:5]],
-            "count": len(ranked),
+            "sources": [r.get("url") for r in diversified],
+            "count": len(diversified),
             "_directive": (
                 "IMPORTANT: Use ONLY the 'context' field above to answer.\n"
                 "Do NOT use your training data. Do NOT guess.\n"
