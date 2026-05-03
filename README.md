@@ -28,34 +28,44 @@ scrapee load <url>   →   CLI scrapes + indexes
 
 ---
 
-## 🎉 Latest Updates (v3.0 - May 2026)
+## 🎉 v3.0.0 Released (May 4, 2026)
 
-### ✨ Correct Architecture: CLI Orchestrator + MCP Context Engine
+### ✨ Production-Ready: Homebrew + Curl Installers
 
 **What's New:**
-- **CLI Orchestrator**: `/load <url>` scrapes + auto-configures VS Code
-- **VS Code Integration**: `.vscode/mcp.json` auto-generated, zero friction
-- **Copilot-Native**: Copilot calls MCP automatically after reload
-- **Multi-platform Distribution**: curl/PowerShell/Homebrew installers + PyInstaller binaries
-- **Adaptive Ranking**: Feedback loop learns from usage (no embeddings, no vectors)
-- **Build System Ready**: Cross-platform compilation, CI/CD, GitHub releases
+- ✅ **Binary Distribution**: Standalone PyInstaller executable (8.6MB)
+- ✅ **Homebrew Tap**: `brew tap jonathanvineet/scrapee && brew install scrapee`
+- ✅ **Curl Installer**: One-line install for macOS/Linux
+- ✅ **Boot System**: Auto-detects project type (React, Python, FastAPI, Rust, Go)
+- ✅ **Auto-Load**: Automatically loads docs for detected frameworks
+- ✅ **Zero Configuration**: Just `scrapee` → boot → ready
+- ✅ **Adaptive Ranking**: Learns from user interactions
 
-**Try it:**
+**Installation:**
 ```bash
+# Homebrew (macOS)
+brew tap jonathanvineet/scrapee
+brew install scrapee
+
+# Or curl (macOS/Linux)
 curl -fsSL https://raw.githubusercontent.com/jonathanvineet/scrapee/main/scripts/install.sh | sh
-scrapee
-
-scrapee> /load https://react.dev
-✓ Loaded successfully (245 docs).
-✓ VS Code configuration updated.
-→ Restart VS Code or reload window
-→ Copilot can now use this context.
-
-# Then in VS Code:
-# Cmd+Shift+I → Ask about React
 ```
 
-**Status:** ✅ Production-ready, orchestrator complete, installers tested
+**Quick Start:**
+```bash
+scrapee
+
+# Auto-detects project (e.g., react, nodejs, python)
+# Auto-loads docs for each detected framework
+
+scrapee> /load https://react.dev
+✓ Indexed successfully (245 docs).
+🧠 Copilot now has access
+
+scrapee> /exit
+```
+
+**Status:** ✅ Production-ready, both installers working
 
 ### What Changed from v2.0
 
@@ -83,32 +93,14 @@ scrapee> /load https://react.dev
 
 ## 📖 Previous Releases
 
-### v2.1 - Multi-Page Crawling (April 6, 2026)
-- Multi-page crawling: Discover 30+ pages automatically
-- Code extraction: 200+ blocks, 15+ language detection
-- Redis persistence: Survive Vercel cold starts
-- Fuzzy search: Handle typos with Levenshtein matching
-
-### v2.0 - 11 MCP Tools (April 4, 2026)
-- Speed: Batch scraping, advanced filtering
-- Data management: Delete, prune, export tools
-- Intelligence: Structured data extraction, code analysis
-- Monitoring: Index stats, URL validation
-
----
-
-## 📖 Previous Releases
-
 ### v2.1 - Multi-Page Crawling with Redis Persistence (April 6, 2026)
-
-- Multi-page crawling: Scrape `https://docs.expo.dev/` → discover & store **30 pages** automatically
-- Code extraction: 200+ code blocks from all pages with 15+ language detection
-- Redis persistence: All data syncs to Redis, survives Vercel deployments
+- Multi-page crawling: Discover & store 30+ pages automatically
+- Code extraction: 200+ blocks, 15+ language detection
+- Redis persistence: Survives Vercel cold starts
 - GitHub repo intelligence: Auto-extract README, structure, key files
 - Fuzzy search: Levenshtein matching handles typos
 
-### v2.0 - 11 New MCP Tools (April 4, 2026)
-
+### v2.0 - 11 MCP Tools (April 4, 2026)
 - Speed & performance: Batch scraping, advanced search filtering
 - Data management: Delete, prune, export, backup tools
 - Intelligence: Structured data extraction, code analysis, document diffing
@@ -118,45 +110,59 @@ scrapee> /load https://react.dev
 
 ## 🚀 Quick Start
 
-### Option 1: CLI (Recommended for Power Users)
+### Installation
 
 ```bash
-# Install (one command)
-curl -fsSL https://raw.githubusercontent.com/jonathanvineet/scrapee/main/scripts/install.sh | sh
-
-# Or via Homebrew (macOS)
+# macOS - Homebrew (recommended)
 brew tap jonathanvineet/scrapee
 brew install scrapee
 
-# Or via pip
-pip install scrapee-cli
+# macOS/Linux - Curl
+curl -fsSL https://raw.githubusercontent.com/jonathanvineet/scrapee/main/scripts/install.sh | sh
 
-# Use it
-scrapee
-
-> /scrape https://docs.python.org
-✓ Context loaded successfully.
-You're good. Ask anything.
-
-> how does asyncio work
----
-(context + sources displayed)
----
+# Python (coming soon)
+# pip install scrapee-cli
 ```
 
-### Option 2: Web UI
+### Usage
 
 ```bash
-# Start backend
-python3 backend/app.py
+# Start Scrapee
+scrapee
 
-# Open in browser
-http://localhost:8080
+# Output:
+# - Shows banner + boot system
+# - Auto-detects: react, nodejs, python (for example)
+# - Auto-loads: docs for each detected project
+# - Ready for commands
+
+# Load additional docs
+scrapee> /load https://react.dev
+✓ Indexed successfully (245 docs).
+🧠 Copilot now has access
+
+# Show indexed sources
+scrapee> /status
+indexed sources:
+✓ mcp connected and ready
+
+# Clear context
+scrapee> /reset
+✓ context cleared
+
+# Exit
+scrapee> /exit
 ```
 
-### Option 3: VS Code + MCP
+### In VS Code
 
-Install the [VS Code MCP extension](https://marketplace.visualstudio.com/items?itemName=scrapee.scrapee-mcp) and connect to your Scrapee instance.
+After running `scrapee /load <url>`:
+
+```
+1. Press Cmd+Shift+I (open Copilot Chat)
+2. Ask: "How do I handle state in React?"
+3. Copilot uses indexed docs from scrapee automatically
+```
 
 ---
 
