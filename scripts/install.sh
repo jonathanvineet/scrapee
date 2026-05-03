@@ -1,12 +1,13 @@
 #!/bin/bash
 # Scrapee CLI installer for macOS and Linux
-# Usage: curl -fsSL https://yourdomain/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/jonathanvineet/scrapee/main/scripts/install.sh | sh
 
 set -e
 
 REPO="jonathanvineet/scrapee"
 BINARY_NAME="scrapee"
 INSTALL_DIR="/usr/local/bin"
+VERSION="v3.0.0"
 
 echo "🦇 Installing scrapee..."
 
@@ -14,20 +15,23 @@ echo "🦇 Installing scrapee..."
 OS=$(uname -s)
 ARCH=$(uname -m)
 
+# For now, use the repository binary directly (Darwin arm64 supported)
+# In production, build multi-platform binaries and push to releases
 case "$OS" in
   Darwin)
     if [ "$ARCH" = "arm64" ]; then
-      BINARY_URL="https://github.com/${REPO}/releases/latest/download/scrapee-darwin-arm64"
+      # Download from GitHub raw content (v3.0.0 binary)
+      BINARY_URL="https://raw.githubusercontent.com/${REPO}/main/releases/v3.0.0/scrapee"
     else
-      BINARY_URL="https://github.com/${REPO}/releases/latest/download/scrapee-darwin-x86"
+      echo "⚠️  Intel macOS support coming soon. Please build locally:"
+      echo "   pip install PyInstaller && pyinstaller --onefile cli/scrapee.py --name scrapee"
+      exit 1
     fi
     ;;
   Linux)
-    if [ "$ARCH" = "aarch64" ]; then
-      BINARY_URL="https://github.com/${REPO}/releases/latest/download/scrapee-linux-arm64"
-    else
-      BINARY_URL="https://github.com/${REPO}/releases/latest/download/scrapee-linux-x86"
-    fi
+    echo "⚠️  Linux support coming soon. Please build locally:"
+    echo "   pip install PyInstaller && pyinstaller --onefile cli/scrapee.py --name scrapee"
+    exit 1
     ;;
   *)
     echo "❌ Unsupported OS: $OS"
