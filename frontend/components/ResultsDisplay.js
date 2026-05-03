@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { sendFeedback } from '../feedback';
 
 function Section({ title, count, children }) {
   const [open, setOpen] = useState(false);
@@ -124,6 +125,17 @@ export default function ResultsDisplay({ results }) {
   }
 
   const pages = results.data || [];
+
+  useEffect(() => {
+    try {
+      const sources = (pages || []).map(p => p.url).filter(Boolean);
+      if (sources.length) {
+        sendFeedback(sources, true, results.query || '');
+      }
+    } catch (e) {
+      console.warn('sendFeedback error', e);
+    }
+  }, [results]);
 
   const handleDownload = () => {
     const blob = new Blob([JSON.stringify(results, null, 2)], { type: 'application/json' });
