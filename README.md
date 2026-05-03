@@ -1,40 +1,99 @@
-# Scrapee - AI-Powered Context Engine
+# Scrapee — Context Engine for Copilot
 
-A **unified platform** for intelligent web scraping and documentation search with **multiple interfaces**: web UI, command-line CLI, and VS Code integration via MCP.
+A **unified platform** for intelligent web scraping with **three interfaces**:
+- **CLI**: Load docs, configure VS Code
+- **MCP**: Serve context to Copilot  
+- **Web UI**: Visual scraping and search
 
-One brain, three entry points.
+## 🧠 Mental Model
 
 ```
-Web UI → scrape & search
-   ↓
-MCP API (shared backend)
-   ↑
-CLI (persistent session) + VS Code (Copilot integration)
+User Action:              Flow:
+-----------               ----
+scrapee load <url>   →   CLI scrapes + indexes
+                         ↓
+                    CLI writes .vscode/mcp.json
+                         ↓
+                    Restart VS Code
+                         ↓
+                    Copilot calls MCP automatically
+                         ↓
+                    Copilot answers using real docs
 ```
 
-**Latest**: Production CLI with persistent session, multi-platform installers, and complete distribution system.
+**Key Insight:** CLI is an **orchestrator**, not a chatbot.
+- ❌ CLI does NOT answer questions
+- ✅ Copilot (in VS Code) does  
+- ✅ CLI loads docs and configures the integration
 
 ---
 
 ## 🎉 Latest Updates (v3.0 - May 2026)
 
-### ✨ Production CLI + Distribution System
+### ✨ Correct Architecture: CLI Orchestrator + MCP Context Engine
 
 **What's New:**
-- **Persistent Session CLI**: Interactive mode with `/scrape` and `/ask` commands
-- **Multi-platform Installers**: One-command install via curl/PowerShell/Homebrew
-- **Cross-platform Binaries**: PyInstaller builds for macOS (Intel/ARM), Linux, Windows
-- **Adaptive Feedback Loop**: User interactions train ranking algorithm (no heavy ML)
-- **Frontend Integration**: Feedback captured from web UI to improve results over time
-- **Complete Build Guide**: CI/CD setup with GitHub Actions for automated releases
+- **CLI Orchestrator**: `/load <url>` scrapes + auto-configures VS Code
+- **VS Code Integration**: `.vscode/mcp.json` auto-generated, zero friction
+- **Copilot-Native**: Copilot calls MCP automatically after reload
+- **Multi-platform Distribution**: curl/PowerShell/Homebrew installers + PyInstaller binaries
+- **Adaptive Ranking**: Feedback loop learns from usage (no embeddings, no vectors)
+- **Build System Ready**: Cross-platform compilation, CI/CD, GitHub releases
 
 **Try it:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jonathanvineet/scrapee/main/scripts/install.sh | sh
 scrapee
+
+scrapee> /load https://react.dev
+✓ Loaded successfully (245 docs).
+✓ VS Code configuration updated.
+→ Restart VS Code or reload window
+→ Copilot can now use this context.
+
+# Then in VS Code:
+# Cmd+Shift+I → Ask about React
 ```
 
-**Status:** ✅ Production-ready, all installers tested
+**Status:** ✅ Production-ready, orchestrator complete, installers tested
+
+### What Changed from v2.0
+
+**v2.0 Mindset:**
+- CLI acted like a chat tool (`/ask` command)
+- Tried to compete with ChatGPT/Claude
+- Focus: "Scrapee can answer your questions"
+
+**v3.0 Mindset (CORRECT):**
+- CLI is an **orchestrator** (`/load`, `/status`, `/reset` commands)
+- **Integrates with** existing tools (Copilot)
+- Focus: "Scrapee empowers Copilot with real docs"
+
+**Technical Changes:**
+| Feature | v2.0 | v3.0 |
+|---------|------|------|
+| CLI Role | Chat assistant | Orchestrator |
+| `/ask` command | Answer questions | ❌ Removed |
+| `/load` command | Store docs | ✅ Scrape + auto-config VS Code |
+| VS Code setup | Manual `.vscode/mcp.json` | ✅ Auto-generated |
+| Feedback loop | ❌ Not wired | ✅ Integrated in frontend |
+| Distribution | Docker only | ✅ Binaries + installers |
+
+---
+
+## 📖 Previous Releases
+
+### v2.1 - Multi-Page Crawling (April 6, 2026)
+- Multi-page crawling: Discover 30+ pages automatically
+- Code extraction: 200+ blocks, 15+ language detection
+- Redis persistence: Survive Vercel cold starts
+- Fuzzy search: Handle typos with Levenshtein matching
+
+### v2.0 - 11 MCP Tools (April 4, 2026)
+- Speed: Batch scraping, advanced filtering
+- Data management: Delete, prune, export tools
+- Intelligence: Structured data extraction, code analysis
+- Monitoring: Index stats, URL validation
 
 ---
 
@@ -101,65 +160,106 @@ Install the [VS Code MCP extension](https://marketplace.visualstudio.com/items?i
 
 ---
 
-## 🧠 What Scrapee Does
+## 🧠 Architecture: Three Layers
 
-| Task | Tool | Interface |
-|------|------|-----------|
-| Scrape a website | `scrape_url` | Web / CLI |
-| Search loaded docs | `search_and_get` | CLI / VS Code |
-| Analyze code | `analyze_code_dependencies` | Web / MCP |
-| Compare API docs | `compare_documents` | Web / MCP |
-| Batch operations | `batch_scrape_urls` | MCP |
+| Layer | Role | Owns |
+|-------|------|------|
+| **CLI** | Orchestrator | Scraping, indexing, VS Code setup |
+| **MCP** | Context Engine | Storing docs, serving to Copilot |
+| **Copilot** | Reasoner | Thinking, answering with context |
 
 ---
 
-## 📋 CLI Commands
+## 📋 CLI Commands (Orchestrator API)
 
 ```
-scrapee                        # Start interactive session
-scrapee scrape https://...     # Scrape URL (one-shot)
-scrapee --help                 # Show help
+scrapee                    # Start interactive mode
 
-In interactive mode:
-  /scrape <url>   → Load and cache context
-  /ask <query>    → Query (default, no slash needed)
-  /help           → Show commands
-  /exit           → Exit
+# Interactive:
+scrapee> /load <url>      # Scrape + index + configure VS Code
+scrapee> /status          # Show loaded documentation sources
+scrapee> /connect         # Manually update VS Code config
+scrapee> /reset           # Clear all indexed context
+scrapee> /help            # Show command reference
+scrapee> /exit            # Exit
+
+# One-shot mode:
+scrapee load https://react.dev
+scrapee status
+scrapee reset
 ```
 
-**Example Session:**
+**Workflow Example:**
 
-```
+```bash
 $ scrapee
 
-[bat logo + banner]
+╔═══════════════════════════════════════╗
+║        🎯  SCRAPEE ORCHESTRATOR       ║
+║   Load docs. Configure VS Code.       ║
+║   Let Copilot think with context.     ║
+╚═══════════════════════════════════════╝
 
-scrapee CLI v1.0.0 — context engine ready
+scrapee> /load https://react.dev
+[+] Loading: https://react.dev
+    Scraping + indexing...
 
-Commands:
-  /scrape <url>   → Scrape and load context
-  /ask <query>    → Query loaded content (default)
-  /help           → Show this help
-  /exit           → Exit
+✓ Loaded successfully (245 docs).
 
-> /scrape https://fastapi.tiangolo.com
-[+] Scraping: https://fastapi.tiangolo.com...
-✓ Context loaded successfully.
-You're good. Ask anything.
+[*] Configuring VS Code MCP connection...
+✓ VS Code configuration updated.
+  File: .vscode/mcp.json
+  → Restart VS Code or reload window (Cmd+R / Ctrl+R)
+  → Copilot can now use Scrapee context.
 
-> how do I validate request bodies
----
-To validate request bodies in FastAPI, use Pydantic models...
----
+🧠 Copilot can now use this context.
 
-Sources:
-  • FastAPI Request Bodies — https://fastapi.tiangolo.com/tutorial/body/
+scrapee> /status
 
-> middleware best practices
----
-Middleware wraps your app lifecycle...
----
+📚 Loaded sources:
+
+  1. https://react.dev
+     → 245 documents
+     → Indexed: 2026-05-03T14:32:10.123456
+
+Total: 1 source(s)
+
+scrapee> /exit
+👋 Goodbye!
 ```
+
+**Then in VS Code:**
+```
+Cmd+Shift+I (open Copilot)
+→ Ask: "How do I handle state in React?"
+→ Copilot uses loaded React docs automatically
+```
+
+---
+
+## 🧠 Design Philosophy
+
+**Scrapee is not another AI chat tool.**
+
+The internet is already full of chatbots. What's missing: **a system that upgrades Copilot itself**.
+
+### The Problem
+You ask Copilot a question about React, and it uses stale training data (cutoff: April 2024). You want it to use **your docs** — the real, current source of truth.
+
+### The Solution
+```
+CLI: Load docs
+ ↓
+MCP: Index docs  
+ ↓
+Copilot: Answer using REAL docs
+```
+
+### Why Not Chat in CLI?
+- ❌ CLI-based chat = competing with Claude/ChatGPT
+- ❌ Copilot is already a better reasoner
+- ✅ CLI as orchestrator = integrating with existing tools
+- ✅ One brain (Copilot) powered by your docs
 
 ---
 
