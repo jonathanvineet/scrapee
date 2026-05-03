@@ -19,13 +19,18 @@ from pathlib import Path
 
 try:
     import requests
+    import urllib3
+    urllib3.disable_warnings()  # Suppress LibreSSL warning
 except ImportError:
     print("Error: requests not installed. Run: pip install requests", file=sys.stderr)
     sys.exit(1)
 
 # ==================== CONFIG ====================
 VERSION = "3.0.0"
-MCP_BASE_URL = os.environ.get("SCRAPEE_BASE_URL") or "https://your-vercel-url.vercel.app"
+
+# Real Vercel backend URL (set via env or hardcode)
+# Set: export SCRAPEE_BASE_URL="https://scrapee-backend.vercel.app"
+MCP_BASE_URL = os.environ.get("SCRAPEE_BASE_URL") or "https://scrapee-api.vercel.app"
 VSCODE_CONFIG_PATH = Path(".vscode/mcp.json")
 CONTEXT_FILE = Path(".scrapee/context.json")
 
@@ -218,19 +223,25 @@ def handle_load(url):
     """Load/scrape a URL into MCP context."""
     print(f"\n[+] loading: {url}\n")
     
+    res = scrape_url(url)
+    
+    if not res:
+        print("✗ no response from MCP\n")
+        return False
+    
     try:
-        res = scrape_url(url)
+        structured = res.get("result", {}).get("structuredContent", {})
         
-        if res and "result" in res:
-            doc_count = res["result"].get("doc_count", 1)
-            print(f"✓ indexed successfully ({doc_count} docs)")
-            print("🧠 copilot now has access\n")
-            return True
-        else:
-            print("✗ failed\n")
-            return False
+        doc_count = structured.get("doc_count", 1)
+        
+        print(f"✓ indexed successfully ({doc_count} docs)")
+        print("🧠 copilot now has access\n")
+        
+        return True
+    
     except Exception as e:
-        print(f"✗ error: {e}\n")
+        print("✗ MCP response malformed\n")
+        print(f"Response: {res}\n")
         return False
 
 
@@ -239,33 +250,35 @@ def handle_status():
     print("\nindexed sources:\n")
     
     try:
-        # Try to get docs from MCP
         res = call_mcp("tools/call", {
-            "name": "search_and_get",
-            "arguments": {"query": "*", "limit": 1}
+            "name": "list_docs",
+            "arguments": {"limit": 20}
         })
         
-        if res and "result" in res:
-            content = res["result"]
-            print("✓ mcp connected and ready\n")
-        else:
-            print("(no data available)\n")
-    except:
-        print("(unable to connect to MCP)\n")
+        if not res:
+            print("(unable to connect to MCP)\n")
+            return
+        
+        data = res.get("result", {}).get("structuredContent", {})
+        urls = data.get("urls", [])
+        
+        if not urls:
+            print("(no documents indexed yet)\n")
+            return
+        
+        for url in urls:
+            print(f"  - {url}")
+        
+        print()
+    
+    except Exception as e:
+        print(f"(error fetching status: {e})\n")
 
 
 def handle_reset():
     """Reset/clear indexed context."""
-    print("\nclearing context...\n")
-    
-    try:
-        res = call_mcp("tools/call", {
-            "name": "delete_document",
-            "arguments": {"url": "*"}  # Pseudo-wildcard
-        })
-        print("✓ context cleared\n")
-    except:
-        print("✓ context cleared\n")
+    print("\n⚠️  reset not yet implemented in MCP\n")
+    print("(This feature will be added in v3.1)\n")
 
 
 def show_help():
