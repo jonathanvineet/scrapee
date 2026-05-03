@@ -1,117 +1,316 @@
-# Scrapee - Production-Grade Documentation Scraper & MCP Server
+# Scrapee - AI-Powered Context Engine
 
-A full-stack web scraping and document search system with Model Context Protocol (MCP) integration, Flask REST API, SQLite full-text search, and multiple crawling strategies. Built for production deployment on Vercel with comprehensive debugging and fallback mechanisms.
+A **unified platform** for intelligent web scraping and documentation search with **multiple interfaces**: web UI, command-line CLI, and VS Code integration via MCP.
+
+One brain, three entry points.
+
+```
+Web UI → scrape & search
+   ↓
+MCP API (shared backend)
+   ↑
+CLI (persistent session) + VS Code (Copilot integration)
+```
+
+**Latest**: Production CLI with persistent session, multi-platform installers, and complete distribution system.
 
 ---
 
-## Latest Updates (v2.1 - April 6, 2026)
+## 🎉 Latest Updates (v3.0 - May 2026)
 
-### ✨ Multi-Page Crawling with Redis Persistence
+### ✨ Production CLI + Distribution System
 
 **What's New:**
+- **Persistent Session CLI**: Interactive mode with `/scrape` and `/ask` commands
+- **Multi-platform Installers**: One-command install via curl/PowerShell/Homebrew
+- **Cross-platform Binaries**: PyInstaller builds for macOS (Intel/ARM), Linux, Windows
+- **Adaptive Feedback Loop**: User interactions train ranking algorithm (no heavy ML)
+- **Frontend Integration**: Feedback captured from web UI to improve results over time
+- **Complete Build Guide**: CI/CD setup with GitHub Actions for automated releases
+
+**Try it:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/jonathanvineet/scrapee/main/scripts/install.sh | sh
+scrapee
+```
+
+**Status:** ✅ Production-ready, all installers tested
+
+---
+
+## 📖 Previous Releases
+
+### v2.1 - Multi-Page Crawling with Redis Persistence (April 6, 2026)
+
 - Multi-page crawling: Scrape `https://docs.expo.dev/` → discover & store **30 pages** automatically
-- Code extraction: Extract 200+ code blocks from all pages with 15+ language detection
-- Redis persistence: All data syncs to Redis, survives Vercel deployments forever
-- Auto-loading: Frontend payloads auto-import on MCP startup
-- Vercel-ready: Works out-of-box with Vercel KV or external Redis
-- **GitHub Repo Intelligence**: Ask "what does this project do?" → automatically extracts README, src/ structure, and key files
-- **Fuzzy/Typo-Tolerant Search**: Levenshtein distance matching handles typos (e.g., `devopssct` → `devopsct`)
+- Code extraction: 200+ code blocks from all pages with 15+ language detection
+- Redis persistence: All data syncs to Redis, survives Vercel deployments
+- GitHub repo intelligence: Auto-extract README, structure, key files
+- Fuzzy search: Levenshtein matching handles typos
 
-**Quick Start:** See [VERCEL_QUICK_START.md](VERCEL_QUICK_START.md)
+### v2.0 - 11 New MCP Tools (April 4, 2026)
 
-**Setup:** 
-1. Create KV in Vercel dashboard (1 click)
-2. Deploy: `git push origin main`
-3. Test: Scrape a URL and search across all pages
-
-**Status:** ✅ Production-ready, tested with 30-page crawl, 245 code blocks extracted
+- Speed & performance: Batch scraping, advanced search filtering
+- Data management: Delete, prune, export, backup tools
+- Intelligence: Structured data extraction, code analysis, document diffing
+- Monitoring: Index stats and URL validation tools
 
 ---
 
-## GitHub Repo Scraping (NEW!)
+## 🚀 Quick Start
 
-When you scrape a GitHub repository, Scrapee now intelligently extracts:
+### Option 1: CLI (Recommended for Power Users)
 
-**Example:**
 ```bash
-# Scrape a GitHub repo
-POST /mcp
-{
-  "method": "tools/call",
-  "params": {
-    "name": "scrape_url",
-    "arguments": {
-      "url": "https://github.com/jonathanvineet/devopsct"
-    }
-  }
-}
+# Install (one command)
+curl -fsSL https://raw.githubusercontent.com/jonathanvineet/scrapee/main/scripts/install.sh | sh
 
-# Returns:
-{
-  "title": "GitHub: devopsct",
-  "overview": "DevOps automation toolkit... | Main directories: src, lib, tests | Languages: Python",
-  "structure": {
-    "directories": ["src", "lib", "main"],
-    "key_files": ["main.py", "app.py"],
-    "languages": ["Python"]
-  }
-}
+# Or via Homebrew (macOS)
+brew tap jonathanvineet/scrapee
+brew install scrapee
+
+# Or via pip
+pip install scrapee-cli
+
+# Use it
+scrapee
+
+> /scrape https://docs.python.org
+✓ Context loaded successfully.
+You're good. Ask anything.
+
+> how does asyncio work
+---
+(context + sources displayed)
+---
 ```
 
-**What It Extracts:**
-1. **README.md content** - Project description (first 2000 chars)
-2. **Folder structure** - Identifies src/, lib/, main/, app/ directories
-3. **Key files** - Detects main.py, app.py, index.js, setup.py, package.json, pom.xml
-4. **Languages** - Shows programming languages used
-5. **Source code** - When diving into src/, automatically reads actual source files
+### Option 2: Web UI
 
-**Then Ask Questions:**
 ```bash
-# Search for what the project does
-POST /mcp
-{
-  "name": "search_and_get",
-  "arguments": {
-    "query": "what does devopsct do"
-  }
-}
+# Start backend
+python3 backend/app.py
 
-# Search for specific functions
-{
-  "name": "search_code",
-  "arguments": {
-    "query": "deploy function",
-    "limit": 5
-  }
-}
+# Open in browser
+http://localhost:8080
+```
+
+### Option 3: VS Code + MCP
+
+Install the [VS Code MCP extension](https://marketplace.visualstudio.com/items?itemName=scrapee.scrapee-mcp) and connect to your Scrapee instance.
+
+---
+
+## 🧠 What Scrapee Does
+
+| Task | Tool | Interface |
+|------|------|-----------|
+| Scrape a website | `scrape_url` | Web / CLI |
+| Search loaded docs | `search_and_get` | CLI / VS Code |
+| Analyze code | `analyze_code_dependencies` | Web / MCP |
+| Compare API docs | `compare_documents` | Web / MCP |
+| Batch operations | `batch_scrape_urls` | MCP |
+
+---
+
+## 📋 CLI Commands
+
+```
+scrapee                        # Start interactive session
+scrapee scrape https://...     # Scrape URL (one-shot)
+scrapee --help                 # Show help
+
+In interactive mode:
+  /scrape <url>   → Load and cache context
+  /ask <query>    → Query (default, no slash needed)
+  /help           → Show commands
+  /exit           → Exit
+```
+
+**Example Session:**
+
+```
+$ scrapee
+
+[bat logo + banner]
+
+scrapee CLI v1.0.0 — context engine ready
+
+Commands:
+  /scrape <url>   → Scrape and load context
+  /ask <query>    → Query loaded content (default)
+  /help           → Show this help
+  /exit           → Exit
+
+> /scrape https://fastapi.tiangolo.com
+[+] Scraping: https://fastapi.tiangolo.com...
+✓ Context loaded successfully.
+You're good. Ask anything.
+
+> how do I validate request bodies
+---
+To validate request bodies in FastAPI, use Pydantic models...
+---
+
+Sources:
+  • FastAPI Request Bodies — https://fastapi.tiangolo.com/tutorial/body/
+
+> middleware best practices
+---
+Middleware wraps your app lifecycle...
+---
 ```
 
 ---
 
-## Fuzzy Search / Typo Tolerance (NEW!)
+## 📦 Installation Methods
 
-Search now handles typos automatically using **Levenshtein distance**:
+### macOS
 
+**Homebrew (recommended):**
 ```bash
-# These all work:
-search("devopssct")   # Typo: extra 's'  → finds "devopsct" ✓
-search("devopsct")    # Exact match       → finds "devopsct" ✓
-search("function")    # Exact match       → finds "function" ✓
-search("fucntion")    # Typo: 'nc' swap   → finds "function" ✓
+brew tap jonathanvineet/scrapee
+brew install scrapee
 ```
 
-**How It Works:**
-- Layer 1: **FTS5** - Exact indexed search (fastest)
-- Layer 2: **LIKE** - Pattern matching fallback
-- Layer 3: **Fuzzy** - Levenshtein distance matching (handles typos)
+**Curl:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/jonathanvineet/scrapee/main/scripts/install.sh | sh
+```
 
-Up to **2 character differences** tolerance (configurable).
+### Linux
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jonathanvineet/scrapee/main/scripts/install.sh | sh
+```
+
+### Windows
+
+**PowerShell:**
+```powershell
+iwr https://raw.githubusercontent.com/jonathanvineet/scrapee/main/scripts/install.ps1 | iex
+```
+
+### Python Developers
+
+```bash
+pip install scrapee-cli
+```
 
 ---
 
-## Previous Release (v2.0 - 11 New MCP Tools!)
+## 🏗 Architecture
 
-### ✨ Major Expansion: 11 Powerful New Tools (April 4, 2026)
+### System Layers
+
+```
+┌─────────────────────────────────────┐
+│     User Interfaces                 │
+├──────────────┬──────────────┬───────┤
+│   Web UI     │   CLI        │ VS Code│
+│  (Next.js)   │ (Python)     │ (MCP)  │
+└──────────────┼──────────────┼───────┘
+               │              │
+        ┌──────▼──────────────▼──────┐
+        │   MCP + REST API          │
+        │   (Flask HTTP + JSON-RPC)  │
+        └──────┬────────────────────┘
+               │
+        ┌──────▼──────────────────┐
+        │   Storage Layer          │
+        ├──────────────┬───────────┤
+        │ SQLite (FTS5)│ Redis KV  │
+        └──────────────┴───────────┘
+```
+
+### Components
+
+| Component | Purpose | Language |
+|-----------|---------|----------|
+| `backend/app.py` | Flask HTTP server + MCP endpoint | Python |
+| `backend/storage/sqlite_store.py` | Full-text search (FTS5) | Python |
+| `cli/scrapee.py` | Persistent session CLI | Python |
+| `frontend/` | Web UI (Next.js) | JavaScript/React |
+| `mcp_server/` | MCP tools & handlers | Python |
+
+---
+
+## 🔧 Building & Distribution
+
+### For Developers: Build Standalone Binary
+
+```bash
+pip install PyInstaller
+pyinstaller --onefile cli/scrapee.py --name scrapee
+
+# Output: dist/scrapee
+```
+
+### For Maintainers: Full Distribution Setup
+
+See [BUILDING.md](BUILDING.md) for:
+- Cross-platform binary builds
+- Creating GitHub releases
+- Setting up CI/CD with GitHub Actions
+- Publishing to PyPI
+
+---
+
+## ✨ Key Features
+
+### Smart Scraping
+- **Multi-page crawling**: Automatically discover and scrape 30+ pages
+- **GitHub-aware**: Extracts README, structure, key files from repos
+- **Code extraction**: 15+ language support, 200+ blocks per site
+- **JavaScript rendering**: Optional Selenium for dynamic content
+
+### Intelligent Search
+- **Full-text search (FTS5)**: Fast indexed search with BM25 ranking
+- **Typo-tolerant**: Levenshtein fuzzy matching up to 2 character differences
+- **Adaptive learning**: Feedback-driven ranking from user interactions
+- **Multi-tier fallback**: FTS → LIKE → fuzzy pattern matching
+
+### Platform Integration
+- **Web UI**: Beautiful Next.js frontend for visual scraping
+- **CLI**: Persistent session with command history
+- **MCP**: VS Code Copilot integration
+- **REST API**: Full JSON-RPC 2.0 support
+
+### Production Ready
+- **Vercel-deployed**: Serverless with persistent storage
+- **Redis persistence**: Survive cold starts with KV cache
+- **Error recovery**: Comprehensive fallback mechanisms
+- **Monitoring**: Built-in stats and health checks
+
+---
+
+## 📚 MCP Tools Available
+
+### Search & Retrieval
+- `search_and_get` - Smart search with auto-fallback
+- `search_with_filters` - Domain/language filtering
+- `get_context` - Adaptive ranking from feedback
+- `search_and_summarize` - Instant summaries
+
+### Scraping & Crawling
+- `scrape_url` - Single URL (auto-detects dynamic content)
+- `batch_scrape_urls` - Parallel batch scraping
+- `multi_page_crawl` - Intelligent multi-page discovery
+
+### Data Analysis
+- `extract_structured_data` - Parse tables, APIs, configs
+- `analyze_code_dependencies` - Code import analysis (9 languages)
+- `compare_documents` - Track documentation changes
+
+### Data Management
+- `delete_document` - Remove single documents
+- `prune_docs` - Bulk cleanup by age/domain
+- `export_index` - Full backup (JSON/SQLite)
+- `get_index_stats` - Comprehensive analytics
+
+---
+
+## 🎯 System Overview (Detailed)
 
 Your Scrapee MCP server now includes **11 new production-ready tools** for enhanced performance and intelligence:
 
