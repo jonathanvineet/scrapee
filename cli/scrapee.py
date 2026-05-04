@@ -15,6 +15,7 @@ import sys
 import os
 import json
 import random
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -65,6 +66,26 @@ DOC_MAP = {
     "go": "https://golang.org/doc/",
     "typescript": "https://www.typescriptlang.org/docs/",
     "nodejs": "https://nodejs.org/docs/",
+}
+
+# Import name → DOC_MAP key mapping
+IMPORT_MAP = {
+    "react": "react",
+    "react-dom": "react",
+    "next": "next",
+    "@next/": "next",
+    "vue": "vue",
+    "svelte": "svelte",
+    "@angular/core": "angular",
+    "fastapi": "fastapi",
+    "flask": "flask",
+    "django": "django",
+    "axios": "nodejs",
+    "express": "nodejs",
+    "numpy": "python",
+    "pandas": "python",
+    "requests": "python",
+    "sqlalchemy": "python",
 }
 
 # ==================== BANNER ====================
