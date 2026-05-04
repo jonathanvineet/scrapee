@@ -6,7 +6,7 @@ class Scrapee < Formula
   on_macos do
     if Hardware::CPU.arm?
       url "https://raw.githubusercontent.com/jonathanvineet/scrapee/main/releases/v3.0.0/scrapee"
-      sha256 "6ce440e1ea480e1f1d02c1f86802c8e597fad18d27789b75df4f1fa3323fcec6"
+      sha256 "98ed65f5ed970be561d68eda5717bfd67e85bd81189c66ff12a7b5dad0ffcae2"
     else
       # Intel macOS - build from source or use precompiled
       url "https://raw.githubusercontent.com/jonathanvineet/scrapee/main/cli/scrapee.py"

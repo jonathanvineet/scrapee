@@ -14,6 +14,7 @@ Flow:
 import sys
 import os
 import json
+import random
 from datetime import datetime
 from pathlib import Path
 
@@ -33,6 +34,21 @@ VERSION = "3.0.0"
 MCP_BASE_URL = os.environ.get("SCRAPEE_BASE_URL") or "https://scrapee-api.vercel.app"
 VSCODE_CONFIG_PATH = Path(".vscode/mcp.json")
 CONTEXT_FILE = Path(".scrapee/context.json")
+
+
+# ==================== MCP HEALTH CHECK ====================
+def check_mcp():
+    """
+    Verify MCP backend is reachable.
+    
+    Returns True if health check passes, False otherwise.
+    """
+    try:
+        response = requests.get(f"{MCP_BASE_URL}/api/health", timeout=5)
+        return response.status_code == 200
+    except:
+        return False
+
 
 # Project → Documentation URL mapping
 DOC_MAP = {
@@ -150,6 +166,39 @@ def detect_project():
     return list(set(detected))
 
 
+# ==================== CONTEXT PERSISTENCE ====================
+def save_context(url):
+    """
+    Save context to local file (URL + timestamp).
+    
+    This makes the CLI stateful — it remembers what was loaded.
+    """
+    CONTEXT_FILE.parent.mkdir(exist_ok=True)
+    
+    data = {
+        "last_url": url,
+        "updated": datetime.utcnow().isoformat()
+    }
+    
+    with open(CONTEXT_FILE, "w") as f:
+        json.dump(data, f)
+
+
+def load_context():
+    """
+    Load context from local file.
+    
+    Returns dict with context data or empty dict if no context exists.
+    """
+    if CONTEXT_FILE.exists():
+        try:
+            with open(CONTEXT_FILE) as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+
 # ==================== VS CODE CONNECTION ====================
 def connect_vscode(auto=False):
     """
@@ -221,64 +270,106 @@ def scrape_url(url):
 # ==================== COMMANDS ====================
 def handle_load(url):
     """Load/scrape a URL into MCP context."""
-    print(f"\n[+] loading: {url}\n")
+    print(f"\n[+] loading: {url}")
+    print("→ contacting MCP...")
     
     res = scrape_url(url)
     
     if not res:
-        print("✗ no response from MCP\n")
+        print("✗ MCP not responding\n")
         return False
     
     try:
         structured = res.get("result", {}).get("structuredContent", {})
         
+        if not structured:
+            print("✗ no usable content extracted\n")
+            return False
+        
         doc_count = structured.get("doc_count", 1)
         
         print(f"✓ indexed successfully ({doc_count} docs)")
-        print("🧠 copilot now has access\n")
+        print("✓ stored in MCP")
+        
+        # Save to local context
+        save_context(url)
+        
+        print("🧠 copilot now has access")
+        
+        # Random success message
+        messages = [
+            "That page didn't stand a chance.",
+            "Knowledge absorbed.",
+            "System upgraded.",
+            "Context locked in.",
+            "Ready for Copilot."
+        ]
+        print(f"→ {random.choice(messages)}\n")
         
         return True
     
     except Exception as e:
-        print("✗ MCP response malformed\n")
-        print(f"Response: {res}\n")
+        print("✗ malformed MCP response\n")
         return False
 
 
 def handle_status():
-    """Show currently indexed sources."""
-    print("\nindexed sources:\n")
+    """Show system status with intelligence."""
+    print("\n=== SYSTEM STATUS ===\n")
     
+    # MCP connectivity
+    if check_mcp():
+        print("MCP: ✓ connected")
+    else:
+        print("MCP: ✗ offline")
+    
+    # Context
+    ctx = load_context()
+    if ctx.get("last_url"):
+        print(f"Last URL: {ctx['last_url']}")
+    
+    # Indexed documents
     try:
         res = call_mcp("tools/call", {
             "name": "list_docs",
             "arguments": {"limit": 20}
         })
         
-        if not res:
-            print("(unable to connect to MCP)\n")
-            return
-        
-        data = res.get("result", {}).get("structuredContent", {})
-        urls = data.get("urls", [])
-        
-        if not urls:
-            print("(no documents indexed yet)\n")
-            return
-        
-        for url in urls:
-            print(f"  - {url}")
-        
-        print()
+        if res:
+            data = res.get("result", {}).get("structuredContent", {})
+            urls = data.get("urls", [])
+            
+            print(f"Documents: {len(urls)}")
+            
+            if urls:
+                for u in urls[:5]:
+                    print(f"  - {u}")
+                
+                if len(urls) > 5:
+                    print(f"  ... +{len(urls)-5} more")
+        else:
+            print("Documents: unavailable")
     
     except Exception as e:
-        print(f"(error fetching status: {e})\n")
+        print("Documents: unavailable")
+    
+    print()
 
 
 def handle_reset():
-    """Reset/clear indexed context."""
-    print("\n⚠️  reset not yet implemented in MCP\n")
-    print("(This feature will be added in v3.1)\n")
+    """Reset/clear local context."""
+    print("\nclearing local context...")
+    
+    if CONTEXT_FILE.exists():
+        try:
+            CONTEXT_FILE.unlink()
+            print("✓ local context cleared")
+        except Exception as e:
+            print(f"✗ error clearing context: {e}")
+    else:
+        print("(no context to clear)")
+    
+    print("⚠️  MCP reset not implemented yet\n")
 
 
 def show_help():
@@ -348,9 +439,23 @@ def boot():
     # Connect to VS Code (silent)
     connect_vscode(auto=True)
     
+    # Check real MCP health
+    mcp_ok = check_mcp()
+    
+    # Load context
+    ctx = load_context()
+    
     # Show status
     print(f"project: {os.getcwd()}")
-    print("mcp: connected")
+    
+    if mcp_ok:
+        print("mcp: ✓ connected")
+    else:
+        print("mcp: ✗ not reachable")
+    
+    if ctx.get("last_url"):
+        print(f"last loaded: {ctx['last_url']}")
+    
     print("status: ready\n")
     print("type /help\n")
 
