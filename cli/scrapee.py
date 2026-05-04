@@ -288,6 +288,152 @@ def scrape_url(url):
     })
 
 
+# ==================== CODE READING / AUTO-SCRAPE ====================
+def get_project_files():
+    """
+    Scan project directory for source code files.
+    
+    Returns list of file paths (limited to 20 for speed).
+    """
+    files = []
+    try:
+        for root, _, filenames in os.walk("."):
+            # Skip common ignore patterns
+            if any(x in root for x in [".git", "node_modules", "__pycache__", ".venv", "dist", "build"]):
+                continue
+            
+            for f in filenames:
+                if f.endswith((".py", ".js", ".ts", ".tsx", ".rs", ".go", ".jsx")):
+                    files.append(os.path.join(root, f))
+    except:
+        pass
+    
+    return files[:20]  # limit for speed
+
+
+def extract_imports(files):
+    """
+    Extract imports from source files (multi-language).
+    
+    Supports: Python, JavaScript, TypeScript, Rust, Go
+    """
+    imports = set()
+    
+    patterns = [
+        r"import\s+(?:(?:\{[^}]*\}|[^;]+)\s+from\s+)?['\"]([^'\"]+)['\"]",  # JS/TS imports
+        r"import\s+([\w\.]+)",                                                  # python import X
+        r"from\s+([\w\.]+)\s+import",                                           # python from X import
+        r"require\(['\"]([^'\"]+)['\"]\)",                                      # node require
+        r"use\s+(?:crate::)?([a-zA-Z0-9_:]+)",                                 # rust use
+    ]
+    
+    for file in files:
+        try:
+            with open(file, "r", errors="ignore") as f:
+                content = f.read(10000)  # read first 10KB only
+            
+            for pattern in patterns:
+                matches = re.findall(pattern, content)
+                for match in matches:
+                    # Clean up and get base import name
+                    base = match.split(".")[0].split("/")[0].lower().strip()
+                    if base and len(base) > 1:  # skip single chars
+                        imports.add(base)
+        
+        except:
+            continue
+    
+    return list(imports)
+
+
+def get_indexed_urls():
+    """
+    Get list of already-indexed URLs from MCP.
+    
+    Returns list of URLs or empty list on error.
+    """
+    try:
+        res = call_mcp("tools/call", {
+            "name": "list_docs",
+            "arguments": {"limit": 100}
+        })
+        
+        if res:
+            return res.get("result", {}).get("structuredContent", {}).get("urls", [])
+    except:
+        pass
+    
+    return []
+
+
+def auto_scrape_from_code():
+    """
+    Scan project code for imports and auto-load missing documentation.
+    
+    This is the magic: detects what libraries you use and loads their docs automatically.
+    """
+    print("\n🔍 scanning codebase...\n")
+    
+    files = get_project_files()
+    
+    if not files:
+        print("(no source files found)\n")
+        return
+    
+    imports = extract_imports(files)
+    
+    if not imports:
+        print("(no imports detected)\n")
+        return
+    
+    print(f"detected: {', '.join(imports[:8])}")
+    if len(imports) > 8:
+        print(f"  ... and {len(imports) - 8} more")
+    print()
+    
+    # Get what's already indexed
+    indexed_urls = get_indexed_urls()
+    
+    # Determine what docs to load
+    to_load = []
+    for imp in imports:
+        doc_key = IMPORT_MAP.get(imp)
+        
+        if not doc_key:
+            continue
+        
+        doc_url = DOC_MAP.get(doc_key)
+        
+        if not doc_url:
+            continue
+        
+        # Skip if already indexed
+        if any(doc_url in url for url in indexed_urls):
+            continue
+        
+        to_load.append((imp, doc_key, doc_url))
+    
+    if not to_load:
+        print("✓ everything already loaded\n")
+        return
+    
+    # Load missing docs
+    loaded = []
+    for imp, doc_key, doc_url in to_load:
+        print(f"→ loading {doc_key}...")
+        res = scrape_url(doc_url)
+        
+        if res and "result" in res:
+            loaded.append(doc_key)
+            doc_count = res.get("result", {}).get("structuredContent", {}).get("doc_count", 1)
+            print(f"  ✓ {doc_count} docs")
+    
+    if loaded:
+        print(f"\n✓ auto-loaded: {', '.join(set(loaded))}\n")
+    else:
+        print(f"(unable to load docs)\n")
+
+
 # ==================== COMMANDS ====================
 def handle_load(url):
     """Load/scrape a URL into MCP context."""
@@ -420,37 +566,6 @@ Philosophy:
     print(help_text)
 
 
-# ==================== AUTO-LOAD ====================
-def auto_load():
-    """
-    Detect project type and auto-load documentation.
-    
-    This is optional but very powerful.
-    """
-    detected = detect_project()
-    
-    if not detected:
-        return
-    
-    print(f"\nauto-detected: {', '.join(detected)}")
-    print("auto-loading docs...\n")
-    
-    loaded = []
-    for project_type in detected:
-        url = DOC_MAP.get(project_type)
-        
-        if url:
-            print(f"  → {project_type}...")
-            res = scrape_url(url)
-            
-            if res and "result" in res:
-                loaded.append(project_type)
-                print(f"    ✓ {res['result'].get('doc_count', 1)} docs")
-    
-    if loaded:
-        print(f"\n✓ {len(loaded)} doc set(s) loaded\n")
-
-
 # ==================== BOOT SYSTEM ====================
 def boot():
     """Initialize Scrapee system."""
@@ -477,6 +592,9 @@ def boot():
     if ctx.get("last_url"):
         print(f"last loaded: {ctx['last_url']}")
     
+    # 🔥 NEW: Auto-scrape from code (reads imports, loads missing docs)
+    auto_scrape_from_code()
+    
     print("status: ready\n")
     print("type /help\n")
 
@@ -485,9 +603,6 @@ def boot():
 def run():
     """Main REPL loop."""
     boot()
-    
-    # Optional: auto-load project docs
-    auto_load()
     
     while True:
         try:
