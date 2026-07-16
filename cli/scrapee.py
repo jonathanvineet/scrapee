@@ -92,7 +92,7 @@ IMPORT_MAP = {
 def show_banner():
     """Display ASCII banner."""
     banner = r"""
-        _==/          i     i          \==_
+                _==/          i     i          \==_
               /XX/            |\___/|            \XX\
             /XXXX\            |XXXXX|            /XXXX\
            |XXXXXX\_         _/XXXXX\_         _/XXXXXX|
