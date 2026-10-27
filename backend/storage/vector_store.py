@@ -59,8 +59,15 @@ class VectorStore:
     # Lightweight model: fast, 80MB, works offline
     SBERT_MODEL = "all-MiniLM-L6-v2"
 
-    def __init__(self, conn: sqlite3.Connection):
-        self.conn = conn
+    @property
+    def conn(self) -> sqlite3.Connection:
+        source = self._conn_source
+        return source() if callable(source) else source
+
+    def __init__(self, conn):
+        # A connection, or a zero-argument callable returning the calling
+        # thread's connection (SQLiteStore keeps one per thread).
+        self._conn_source = conn
         self._lock = threading.Lock()
         self._model_lock = threading.Lock()  # guards first SBERT model load only
 

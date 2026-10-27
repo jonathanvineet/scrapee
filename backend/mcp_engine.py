@@ -217,7 +217,7 @@ class MCPServer:
         self.vector_store = None
         if VECTOR_AVAILABLE and get_vector_store:
             try:
-                self.vector_store = get_vector_store(self.store.conn)
+                self.vector_store = get_vector_store(lambda: self.store.conn)
                 print("[L2] ✓ Semantic vector search active")
             except Exception as e:
                 print(f"[L2] Vector store init failed: {e}")

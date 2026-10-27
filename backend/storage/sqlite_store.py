@@ -85,31 +85,52 @@ class SQLiteStore:
         # Attempt to pull remote DB before opening Local SQLite
         self._pull_from_redis()
 
+        # One connection per thread. The macOS system SQLite is built with
+        # THREADSAFE=2, where a connection used by two threads at once can
+        # segfault the process; Flask request threads and the background
+        # auto-crawler all touch the store. WAL lets the per-thread
+        # connections read concurrently; writers are serialised by
+        # _write_lock and wait on a busy lock rather than fail.
+        self._local = threading.local()
+        self._shared_memory_conn = None
         try:
-            self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self._open_connection()
         except sqlite3.OperationalError:
             fallback_path = os.path.join("/tmp", "scrapee", "docs.db")
             if self.db_path != fallback_path:
                 self.db_path = fallback_path
                 _ensure_parent_dir(self.db_path)
-                self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
             else:
                 self.db_path = ":memory:"
-                self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self._open_connection()
 
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA foreign_keys = ON")
-        if self.db_path != ":memory:":
-            self.conn.execute("PRAGMA journal_mode = WAL")
-        self.conn.execute("PRAGMA synchronous = NORMAL")
-        # This connection is shared across the Flask request threads AND the
-        # background auto-crawler thread. Serialise writers so an interrupted
-        # write (or a WAL checkpoint race) can't surface as "database disk
-        # image is malformed", and wait rather than fail on a busy lock.
-        self.conn.execute("PRAGMA busy_timeout = 8000")
         self._write_lock = threading.RLock()
         self._init_schema()
         print(f"✓ SQLite initialized: {self.db_path}")
+
+    def _open_connection(self) -> sqlite3.Connection:
+        if self.db_path == ":memory:":
+            # A memory DB exists per connection, so it must be shared; guard it
+            # with the write lock instead.
+            if self._shared_memory_conn is None:
+                self._shared_memory_conn = sqlite3.connect(":memory:", check_same_thread=False)
+                self._shared_memory_conn.row_factory = sqlite3.Row
+            self._local.conn = self._shared_memory_conn
+            return self._shared_memory_conn
+        conn = sqlite3.connect(self.db_path, timeout=8)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute("PRAGMA busy_timeout = 8000")
+        self._local.conn = conn
+        return conn
+
+    @property
+    def conn(self) -> sqlite3.Connection:
+        """This thread's connection, opened on first use."""
+        conn = getattr(self._local, "conn", None)
+        return conn if conn is not None else self._open_connection()
 
     def _pull_from_redis(self):
         """Download the SQLite database from Redis to the local filesystem."""
@@ -558,7 +579,7 @@ class SQLiteStore:
             # Level 2 Semantic Vector Indexing
             if VECTOR_AVAILABLE and get_vector_store:
                 try:
-                    vs = get_vector_store(self.conn)
+                    vs = get_vector_store(lambda: self.conn)
                     vs.index_doc(doc_id, content, title)
                 except Exception as e:
                     print(f"[VEC] Error indexing doc {doc_id}: {e}")
@@ -1544,9 +1565,11 @@ class SQLiteStore:
         return row["affinity"] if row else 0
 
     def close(self):
-        """Close database connection."""
-        if self.conn:
-            self.conn.close()
+        """Close this thread's database connection."""
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            conn.close()
+            self._local.conn = None
 
 
 # Singleton instance

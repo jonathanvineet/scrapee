@@ -108,6 +108,45 @@ class RetrievalTests(Base):
                          "https://fastapi.tiangolo.com/tutorial/path-params/")
 
 
+class ConcurrencyTests(Base):
+    def test_threads_get_their_own_connection_and_can_read_while_one_writes(self):
+        import threading
+        errors = []
+
+        def reader():
+            try:
+                for _ in range(60):
+                    self.store.search_docs("useState hook")
+                    self.store.get_stats()
+                    self.store.list_sources()
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+        def writer():
+            try:
+                for i in range(30):
+                    self.store.save_doc(f"https://threads.dev/{i}", PATH_DOC + f" page {i}", {"title": f"t{i}"})
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+
+        threads = [threading.Thread(target=reader) for _ in range(8)] + [threading.Thread(target=writer)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        self.assertIsNot(self.store.conn, self._other_thread_conn())
+        self.store.delete_domain_documents("threads.dev")
+
+    def _other_thread_conn(self):
+        import threading
+        box = []
+        t = threading.Thread(target=lambda: box.append(self.store.conn))
+        t.start()
+        t.join()
+        return box[0]
+
+
 class ApiTests(Base):
     def setUp(self):
         self.client = app.test_client()

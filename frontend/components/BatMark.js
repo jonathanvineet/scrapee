@@ -1,16 +1,23 @@
-// Scrapee's mark: a bat in flight, drawn for this product.
-export default function BatMark({ size = 28, title }) {
+// Scrapee's mark: wings swept to sharp tips, two scalloped cuts a side, a
+// pointed tail. Drawn for this product (not traced from any existing emblem).
+export const BAT_PATH =
+  'M50 38 C46 26 39 22 35 26 C31 19 22 19 17 27 C14 21 7 20 2 28 C5 18 14 8 21 2 ' +
+  'C27 9 36 14 45 13.5 L46.5 6 L48.5 10.5 L51.5 10.5 L53.5 6 L55 13.5 ' +
+  'C64 14 73 9 79 2 C86 8 95 18 98 28 C93 20 86 21 83 27 C78 19 69 19 65 26 C61 22 54 26 50 38 Z';
+
+export default function BatMark({ size = 28, title, className }) {
   return (
     <svg
+      className={className}
       width={size}
-      height={size / 2}
-      viewBox="0 0 64 32"
+      height={size * 0.4}
+      viewBox="0 0 100 40"
       fill="currentColor"
       role={title ? 'img' : undefined}
       aria-hidden={title ? undefined : true}
       aria-label={title}
     >
-      <path d="M32 8 L35.5 3.5 L36.5 9 C42 7 52 5 62 8 C58 11 57 15 58 19 C54 16.5 50 17 48 20 C45 17.5 41 18.5 39 22 C37 21 34 23.5 32 28 C30 23.5 27 21 25 22 C23 18.5 19 17.5 16 20 C14 17 10 16.5 6 19 C7 15 6 11 2 8 C12 5 22 7 27.5 9 L28.5 3.5 Z" />
+      <path d={BAT_PATH} />
     </svg>
   );
 }

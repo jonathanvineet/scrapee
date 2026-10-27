@@ -46,10 +46,14 @@ def is_useful_content(content: str) -> bool:
         "blocked",
     ]
     
-    content_lower = content.lower()
-    if any(p in content_lower for p in bad_patterns):
-        return False
-    
+    # Error and loading screens are short. A full docs page legitimately says
+    # "blocked" or "please wait" (GitLab's SSH guide does), so only judge
+    # short pages by these phrases.
+    if len(content) < 1500:
+        content_lower = content.lower()
+        if any(p in content_lower for p in bad_patterns):
+            return False
+
     return True
 
 
