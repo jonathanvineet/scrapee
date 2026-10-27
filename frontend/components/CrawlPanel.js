@@ -78,7 +78,7 @@ export default function CrawlPanel({ onIndexed, suggest }) {
 
   return (
     <section className="panel crawl" aria-labelledby="crawl-title">
-      <h2 id="crawl-title" className="panel-title">Add a docs site</h2>
+      <h2 id="crawl-title" className="panel-title">add_target <span className="panel-hint">// crawl a docs site</span></h2>
       <form
         className="crawl-form"
         onSubmit={(e) => {
@@ -115,7 +115,7 @@ export default function CrawlPanel({ onIndexed, suggest }) {
           ))}
         </select>
         <button type="submit" className="btn btn-primary" disabled={running}>
-          {running ? 'Crawling…' : 'Crawl site'}
+          {running ? 'CRAWLING…' : 'EXECUTE ▸'}
         </button>
       </form>
 
@@ -135,7 +135,9 @@ export default function CrawlPanel({ onIndexed, suggest }) {
 
       {running && (
         <div className="crawl-status" role="status" aria-live="polite">
-          <span className="pulse" aria-hidden="true" />
+          <span className="bits" aria-hidden="true">
+            {Array.from({ length: 12 }, () => (Math.random() < 0.5 ? '0' : '1')).join('')}
+          </span>
           <span>
             Crawling <strong>{hostOf(job.url)}</strong>, following links up to {job.limit} pages
           </span>

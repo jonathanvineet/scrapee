@@ -77,7 +77,7 @@ export default function SourcesTable({ data, error, onRetry, onChanged }) {
   return (
     <section className="panel sources" aria-labelledby="sources-title">
       <div className="panel-head">
-        <h2 id="sources-title" className="panel-title">Indexed sites</h2>
+        <h2 id="sources-title" className="panel-title">indexed_sites <span className="panel-hint">// what your AI knows</span></h2>
         {data && (
           <span className="faint">
             {plural(sources.length, 'site')} · {plural(data.total_docs, 'page')} · {plural(data.total_code_blocks, 'code block')}

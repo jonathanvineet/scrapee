@@ -21,7 +21,7 @@ export default function ConnectPanel() {
 
   return (
     <section className="panel connect" aria-labelledby="connect-title">
-      <h2 id="connect-title" className="panel-title">Connect your editor</h2>
+      <h2 id="connect-title" className="panel-title">uplink <span className="panel-hint">// connect your editor</span></h2>
       <p className="panel-sub">
         Add this to <code>.vscode/mcp.json</code>, or run <code>scrapee</code> in your project and it writes it for you.
       </p>

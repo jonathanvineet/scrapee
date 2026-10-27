@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import BatMark from '@/components/BatMark';
+import MatrixRain from '@/components/MatrixRain';
 import CrawlPanel from '@/components/CrawlPanel';
 import SourcesTable from '@/components/SourcesTable';
 import AskPanel from '@/components/AskPanel';
@@ -45,21 +46,35 @@ export default function Home() {
 
   return (
     <div className="shell">
+      <MatrixRain />
+      <div className="crt" aria-hidden="true" />
+
       <header className="topbar">
         <div className="brand">
-          <BatMark size={30} />
-          <span className="brand-name">Scrapee</span>
+          <BatMark size={34} />
+          <span className="brand-name">SCRAPEE</span>
+          <span className="brand-node">// gotham node</span>
         </div>
         <div className="endpoint" title="MCP endpoint your editor connects to">
           <span className={`dot ${offline ? 'dot-off' : health ? 'dot-on' : ''}`} aria-hidden="true" />
-          <span className="sr-only">{offline ? 'Backend offline' : health ? 'Backend online' : 'Checking backend'}</span>
-          <span className="mono endpoint-url">{MCP_URL}</span>
+          <span className="status-word">{offline ? '[OFFLINE]' : health ? '[ONLINE]' : '[....]'}</span>
+          <span className="endpoint-url">{MCP_URL}</span>
         </div>
       </header>
 
       <main className="canvas">
-        <div className="title-row">
-          <h1>Your docs index</h1>
+        <div className="hero">
+          <div className="signal" aria-hidden="true">
+            <BatMark size={220} />
+          </div>
+          <p className="prompt">
+            root@gotham:~$ <span className="typed">scrapee --index</span>
+            <span className="cursor" aria-hidden="true">█</span>
+          </p>
+          <h1 className="glitch" data-text="SCRAPEE">
+            SCRAPEE
+          </h1>
+          <p className="tagline">Any website, served to your AI over MCP.</p>
           <p className="subline">
             {offline ? (
               <>

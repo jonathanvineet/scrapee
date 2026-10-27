@@ -72,7 +72,7 @@ export default function AskPanel({ disabled }) {
 
   return (
     <section className="panel ask" aria-labelledby="ask-title">
-      <h2 id="ask-title" className="panel-title">What your AI gets</h2>
+      <h2 id="ask-title" className="panel-title">intercept <span className="panel-hint">// what your AI gets</span></h2>
       <p className="panel-sub">
         Ask the way your editor would. This is the exact <code>get_context</code> answer an MCP client receives.
       </p>

@@ -1,22 +1,22 @@
-import { Schibsted_Grotesk, JetBrains_Mono } from 'next/font/google';
+import { JetBrains_Mono, Share_Tech_Mono } from 'next/font/google';
 import '@/styles/globals.css';
 
-const sans = Schibsted_Grotesk({ subsets: ['latin'], variable: '--font-sans', display: 'swap' });
 const mono = JetBrains_Mono({ subsets: ['latin'], variable: '--font-mono', display: 'swap' });
+const display = Share_Tech_Mono({ subsets: ['latin'], weight: '400', variable: '--font-display', display: 'swap' });
 
 export const metadata = {
-  title: 'Scrapee · your docs index',
+  title: 'SCRAPEE // gotham node',
   description:
     'Paste a URL. Scrapee crawls the whole site, indexes every page and code block, and serves it to your AI coding assistant over MCP.',
 };
 
 export const viewport = {
-  themeColor: '#0c0d0f',
+  themeColor: '#050505',
 };
 
 export default function RootLayout({ children }) {
   return (
-    <html lang="en" className={`${sans.variable} ${mono.variable}`}>
+    <html lang="en" className={`${mono.variable} ${display.variable}`}>
       <body>{children}</body>
     </html>
   );
