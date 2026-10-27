@@ -1,11 +1,11 @@
 /*
-  SCRAPEE // the Bat-signal over Gotham.
-  No panels. A sky of binary, one beam you type into, sites orbiting it as
-  stars, and transmissions that decode out of the dark.
+  SCRAPEE // the swarm.
+  A WebGL field of bats over binary rain; everything else is light floating
+  above it: a wordmark, a status, a view switch, one command line.
 */
 
 :root {
-  --void: #030303;
+  --void: #020202;
   --signal: #ffd500;
   --hot: #fff4b0;
   --amber: #f5a400;
@@ -17,19 +17,6 @@
 
   --glow-sm: 0 0 6px rgba(255, 213, 0, 0.65);
   --glow: 0 0 10px rgba(255, 213, 0, 0.7), 0 0 34px rgba(255, 213, 0, 0.3);
-
-  /* The beam, its ring, and the two orbits around it. */
-  --sig: min(50vmin, 460px);
-  --ring: calc(var(--sig) * 1.26);
-  /* Orbits clear the ring by at least 60px; the far orbit staggers labels. */
-  /* Horizontal reach is capped so the widest label (~240px) keeps a 32px margin. */
-  --rx: min(calc(var(--ring) / 2 + 220px), calc(50vw - 272px));
-  --ry: calc(var(--ring) / 2 + 64px);
-  --rx-far: min(calc(var(--rx) + 70px), calc(50vw - 240px));
-  --ry-far: calc(var(--ry) + 30px);
-
-  --mx: 50vw;
-  --my: 50vh;
 
   --font: var(--font-mono), ui-monospace, 'SFMono-Regular', monospace;
   --font-head: var(--font-display), var(--font-mono), monospace;
@@ -44,6 +31,7 @@
 html,
 body {
   margin: 0;
+  height: 100%;
   background: var(--void);
 }
 
@@ -53,7 +41,7 @@ body {
   font-size: 13.5px;
   line-height: 21px;
   -webkit-font-smoothing: antialiased;
-  overflow-x: hidden;
+  overflow: hidden;
 }
 
 h1,
@@ -104,44 +92,82 @@ mark {
   text-shadow: var(--glow);
 }
 
-/* ─── The sky ───────────────────────────────────────────── */
+/* ─── The void and the swarm ────────────────────────────── */
 
-.sky {
-  position: relative;
-  min-height: 100vh;
-}
-
-.matrix {
+.void {
   position: fixed;
   inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  opacity: 0.9;
-  -webkit-mask-image: radial-gradient(circle 360px at var(--mx) var(--my), #000 0%, rgba(0, 0, 0, 0.5) 45%, rgba(0, 0, 0, 0.18) 100%);
-  mask-image: radial-gradient(circle 360px at var(--mx) var(--my), #000 0%, rgba(0, 0, 0, 0.5) 45%, rgba(0, 0, 0, 0.18) 100%);
+  overflow: hidden;
 }
 
-.crt {
-  position: fixed;
+.swarm {
+  position: absolute;
   inset: 0;
-  z-index: 1;
-  pointer-events: none;
-  background:
-    repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.32) 0 1px, transparent 1px 3px),
-    radial-gradient(ellipse at center, transparent 45%, rgba(0, 0, 0, 0.85) 100%);
+  cursor: grab;
 }
 
+.swarm:active {
+  cursor: grabbing;
+}
+
+.swarm canvas {
+  display: block;
+}
+
+.site-labels,
 .mark,
 .uplink,
-.stage {
-  position: relative;
+.views,
+.command,
+.transmission {
   z-index: 2;
 }
 
-/* ─── Floating corners: wordmark + uplink ───────────────── */
+.site-labels {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.site-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: grid;
+  justify-items: center;
+  padding: 4px 8px;
+  background: none;
+  border: 0;
+  opacity: 0;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: opacity 400ms;
+  will-change: transform;
+}
+
+.site-name {
+  font-size: 13px;
+  color: var(--text);
+  text-shadow: 0 0 8px #000, 0 0 3px #000;
+}
+
+.site-n {
+  font-size: 11px;
+  color: var(--gold);
+  text-shadow: 0 0 6px #000;
+}
+
+.site-label:hover .site-name,
+.site-label:focus-visible .site-name,
+.site-label.is-lit .site-name {
+  color: var(--signal);
+  text-shadow: var(--glow);
+}
+
+/* ─── Corners ───────────────────────────────────────────── */
 
 .mark {
-  position: fixed;
+  position: absolute;
   top: 22px;
   left: 26px;
   display: flex;
@@ -149,6 +175,7 @@ mark {
   gap: 12px;
   color: var(--signal);
   filter: drop-shadow(0 0 8px rgba(255, 213, 0, 0.6));
+  pointer-events: none;
 }
 
 .mark-name {
@@ -159,7 +186,7 @@ mark {
 }
 
 .uplink {
-  position: fixed;
+  position: absolute;
   top: 26px;
   right: 28px;
   display: flex;
@@ -188,10 +215,8 @@ mark {
   animation: twinkle 2.6s ease-in-out infinite;
 }
 
-.uplink.is-lost,
-.uplink.is-lost .uplink-dot {
+.uplink.is-lost {
   color: var(--danger);
-  background: none;
 }
 
 .uplink.is-lost .uplink-dot {
@@ -199,461 +224,215 @@ mark {
   box-shadow: 0 0 10px var(--danger);
 }
 
-/* ─── Stage ─────────────────────────────────────────────── */
-
-.stage {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
+@keyframes twinkle {
+  50% {
+    opacity: 0.45;
+  }
 }
 
-/* ─── The signal: ring + beam ───────────────────────────── */
+/* View switch: two words of light, the active one lit. */
+.views {
+  position: absolute;
+  top: 64px;
+  right: 28px;
+  display: flex;
+  gap: 18px;
+}
 
-.signal {
-  position: relative;
-  width: var(--ring);
-  height: var(--ring);
-  margin-top: calc(50vh - var(--ring) / 2);
-  flex: none;
+.views button {
+  white-space: nowrap;
+  padding: 2px 0;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  color: var(--faint);
+  font-size: 12px;
+  cursor: pointer;
+  transition: color 160ms, border-color 160ms, text-shadow 160ms;
+}
+
+.views button:hover {
+  color: var(--text);
+}
+
+.views button[aria-pressed='true'] {
+  color: var(--signal);
+  border-bottom-color: var(--signal);
+  text-shadow: var(--glow-sm);
+}
+
+/* ─── Command line ──────────────────────────────────────── */
+
+/* The command line lives in the split of the swarm: Swarm publishes the
+   core's screen position (--core-x/--core-y) and the gap's height every frame. */
+.command {
+  position: absolute;
+  left: var(--core-x, 50%);
+  top: var(--core-y, 50%);
+  width: min(600px, 64vw);
+  transform: translate(-50%, -25px);
   display: grid;
-  place-items: center;
-}
-
-.ring {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  overflow: visible;
+  gap: 10px;
+  justify-items: center;
   pointer-events: none;
 }
 
-.ring-spin {
-  transform-origin: 100px 100px;
-  animation: rotate 70s linear infinite;
+.command > * {
+  pointer-events: auto;
 }
 
-.ring-text {
-  font-family: var(--font-head);
-  font-size: 6.4px;
-  letter-spacing: 1.1px;
-  fill: var(--signal);
-  filter: drop-shadow(0 0 2px rgba(255, 213, 0, 0.8));
-}
-
-.ring-bits {
-  font-family: var(--font);
-  font-size: 4.2px;
-  fill: rgba(255, 213, 0, 0.42);
-}
-
-.ring-ticks {
-  fill: none;
-  stroke: rgba(255, 213, 0, 0.5);
-  stroke-width: 0.5;
-  stroke-dasharray: 0.5 2.6;
-}
-
-.signal.is-busy .ring-spin {
-  animation-duration: 2.4s;
-}
-
-.signal.is-busy .ring-bits {
-  fill: var(--hot);
-}
-
-.signal.is-lost .ring-text {
-  fill: var(--danger);
-  filter: none;
-}
-
-/* The projector on a Gotham rooftop: a cone of light rising into the disc. */
-.projector {
-  position: absolute;
-  top: 50vh;
-  left: 50%;
-  z-index: 0;
-  width: calc(var(--sig) * 0.92);
-  height: 50vh;
-  transform: translateX(-50%);
-  clip-path: polygon(0 0, 100% 0, 57% 100%, 49% 100%);
-  background: linear-gradient(to top, rgba(255, 213, 0, 0.32) 0%, rgba(255, 213, 0, 0.1) 55%, rgba(255, 213, 0, 0.04) 100%);
-  pointer-events: none;
-  animation: projector 6s ease-in-out infinite;
-}
-
-@keyframes projector {
-  50% {
-    opacity: 0.75;
-  }
-}
-
-@keyframes rotate {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-.disc {
+.command-line {
   position: relative;
-  z-index: 2;
-  width: var(--sig);
-  height: var(--sig);
-  border-radius: 50%;
   display: flex;
-  flex-direction: column;
   align-items: center;
-  justify-content: center;
-  gap: calc(var(--sig) * 0.035);
-  color: #050400;
-  /* Hot in the middle, falling off to a soft edge, like light on cloud. */
-  background: radial-gradient(circle at 50% 44%, #fffce6 0%, var(--hot) 24%, var(--signal) 56%, #f0bd00 68%, rgba(240, 189, 0, 0.55) 70%, rgba(255, 213, 0, 0) 71%);
-  filter: drop-shadow(0 0 40px rgba(255, 213, 0, 0.55)) drop-shadow(0 0 120px rgba(255, 213, 0, 0.25));
-  animation: beam 5s ease-in-out infinite;
-}
-
-/* The beam's own light spilling into the sky. */
-.disc::before {
-  content: '';
-  position: absolute;
-  inset: -40%;
-  z-index: -1;
-  border-radius: 50%;
-  background: radial-gradient(circle, rgba(255, 213, 0, 0.18) 30%, transparent 62%);
-  pointer-events: none;
-}
-
-/* Cloud the light lands on: turbulence noise, multiplied into the disc. */
-.disc::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300'%3E%3Cfilter id='c'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.012' numOctaves='4' seed='7'/%3E%3CfeColorMatrix values='0 0 0 0 0.55  0 0 0 0 0.42  0 0 0 0 0  0 0 0 0.9 0'/%3E%3C/filter%3E%3Crect width='300' height='300' filter='url(%23c)'/%3E%3C/svg%3E");
-  background-size: cover;
-  mix-blend-mode: multiply;
-  opacity: 0.35;
-  -webkit-mask-image: radial-gradient(circle, #000 55%, transparent 71%);
-  mask-image: radial-gradient(circle, #000 55%, transparent 71%);
-  pointer-events: none;
-}
-
-.disc > * {
-  position: relative;
-  z-index: 1;
-}
-
-@keyframes beam {
-  50% {
-    filter: drop-shadow(0 0 54px rgba(255, 213, 0, 0.7)) drop-shadow(0 0 160px rgba(255, 213, 0, 0.3));
-  }
-}
-
-.signal.is-busy .disc {
-  animation: beam-busy 0.9s ease-in-out infinite;
-}
-
-@keyframes beam-busy {
-  50% {
-    transform: scale(1.025);
-    filter: brightness(1.12) drop-shadow(0 0 80px rgba(255, 213, 0, 0.9));
-  }
-}
-
-.signal.is-lost .disc {
-  filter: saturate(0.15) brightness(0.45);
-  animation: none;
-}
-
-.disc-bat {
-  display: block;
-  margin-top: calc(var(--sig) * -0.02);
-  color: #070500;
-}
-
-.disc-bat svg {
-  display: block;
-  width: calc(var(--sig) * 0.64);
-  height: auto;
-  filter: drop-shadow(0 2px 0 rgba(255, 252, 230, 0.35));
-}
-
-.summon {
-  width: 82%;
-}
-
-.summon input {
+  gap: 12px;
   width: 100%;
-  height: 40px;
+  height: 50px;
   padding: 0 4px;
+}
+
+/* Brackets of light where the line meets the wings. */
+.command-line::before {
+  content: '';
+  position: absolute;
+  inset: 8px -14px;
+  border-left: 1px solid var(--signal);
+  border-right: 1px solid var(--signal);
+  opacity: 0.55;
+  filter: drop-shadow(0 0 6px var(--signal));
+  pointer-events: none;
+}
+
+.command.is-busy .command-line::before {
+  animation: twinkle 0.8s ease-in-out infinite;
+}
+
+/* A single line of light under the prompt, brighter at its centre. */
+.command-line::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--signal) 20%, var(--hot) 50%, var(--signal) 80%, transparent);
+  box-shadow: 0 0 12px rgba(255, 213, 0, 0.7);
+  transition: opacity 200ms;
+  opacity: 0.65;
+}
+
+.command-line:focus-within::after {
+  opacity: 1;
+}
+
+.command-prompt {
+  color: var(--signal);
+  font-size: 22px;
+  text-shadow: var(--glow);
+}
+
+.command-line input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
   background: transparent;
   border: 0;
-  border-bottom: 2px solid rgba(5, 4, 0, 0.55);
   outline: none;
-  color: #050400;
-  caret-color: #050400;
-  font-size: clamp(13px, 1.75vmin, 17px);
-  font-weight: 600;
+  color: var(--hot);
+  caret-color: var(--signal);
+  font-size: 18px;
   text-align: center;
+  text-shadow: 0 0 10px rgba(0, 0, 0, 0.9);
 }
 
-.summon input::placeholder {
-  color: rgba(5, 4, 0, 0.58);
-  font-weight: 500;
-}
-
-.summon input:focus {
-  border-bottom-color: #050400;
+.command-line input::placeholder {
+  color: var(--faint);
 }
 
 .hints {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
-  gap: 4px 14px;
-  width: 70%;
+  gap: 4px 18px;
 }
 
 .hints button {
   padding: 0;
   background: none;
   border: 0;
-  color: rgba(5, 4, 0, 0.72);
+  color: var(--faint);
   font-size: 12px;
   cursor: pointer;
+  text-shadow: 0 0 6px #000;
 }
 
 .hints button::before {
   content: '› ';
+  color: var(--gold);
 }
 
 .hints button:hover {
-  color: #050400;
-  text-decoration: underline;
-  text-underline-offset: 3px;
+  color: var(--signal);
+  text-shadow: var(--glow-sm);
 }
 
-.disc-busy {
-  display: grid;
-  justify-items: center;
-  gap: 2px;
-  width: 70%;
-  color: #050400;
+.command-busy {
+  display: flex;
+  gap: 14px;
+  color: var(--muted);
   font-size: 12px;
-  text-align: center;
 }
 
 .bits {
-  font-weight: 700;
-  letter-spacing: 0.16em;
-}
-
-/* ─── Constellation ─────────────────────────────────────── */
-
-.constellation {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  z-index: 1;
-  width: 0;
-  height: 0;
-}
-
-.star {
-  --x: calc(cos(var(--a)) * var(--orx));
-  --y: calc(sin(var(--a)) * var(--ory));
-}
-
-/* A thread from the ring out to the star, with light pulsing inward along it. */
-.thread {
-  position: absolute;
-  left: 0;
-  top: 0;
-  width: hypot(var(--x), var(--y));
-  height: 1px;
-  transform-origin: 0 50%;
-  transform: rotate(atan2(var(--y), var(--x)));
-  background: linear-gradient(90deg, transparent 0%, transparent 46%, rgba(255, 213, 0, 0.22) 72%, rgba(255, 213, 0, 0.55) 100%);
-  pointer-events: none;
-  overflow: hidden;
-}
-
-.thread::after {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 100%;
-  width: 36px;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, var(--hot));
-  box-shadow: 0 0 6px var(--signal);
-  animation: inbound 4.5s linear infinite;
-  animation-delay: var(--tw);
-}
-
-@keyframes inbound {
-  0% {
-    left: 100%;
-    opacity: 0;
-  }
-  10% {
-    opacity: 1;
-  }
-  70% {
-    opacity: 1;
-  }
-  100% {
-    left: 42%;
-    opacity: 0;
-  }
-}
-
-.star-pos {
-  position: absolute;
-  left: var(--x);
-  top: var(--y);
-  width: 0;
-  height: 0;
-}
-
-/* The dot sits exactly on the orbit; the label hangs off it, away from the signal. */
-.star-btn {
-  position: absolute;
-  left: 0;
-  top: 0;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px;
-  background: none;
-  border: 0;
-  cursor: pointer;
-  white-space: nowrap;
-  animation: drift 7s ease-in-out infinite;
-  animation-delay: calc(var(--tw) * -1);
-}
-
-.star-east .star-btn {
-  transform: translate(calc(var(--s) / -2 - 6px), -50%);
-}
-
-.star-west .star-btn {
-  flex-direction: row-reverse;
-  transform: translate(calc(-100% + var(--s) / 2 + 6px), -50%);
-}
-
-.star-north .star-btn {
-  flex-direction: column-reverse;
-  transform: translate(-50%, calc(-100% + var(--s) / 2 + 6px));
-}
-
-.star-south .star-btn {
-  flex-direction: column;
-  transform: translate(-50%, calc(var(--s) / -2 - 6px));
-}
-
-.star-label {
-  display: grid;
-  line-height: 1.25;
-}
-
-.star-west .star-label {
-  text-align: right;
-}
-
-.star-north .star-label,
-.star-south .star-label {
-  text-align: center;
-}
-
-@keyframes drift {
-  50% {
-    margin-top: -5px;
-  }
-}
-
-.star-dot {
-  flex: none;
-  width: var(--s);
-  height: var(--s);
-  border-radius: 50%;
-  background: var(--hot);
-  box-shadow: 0 0 8px var(--signal), 0 0 20px rgba(255, 213, 0, 0.7), 0 0 44px rgba(255, 213, 0, 0.3);
-  animation: twinkle 3.2s ease-in-out infinite;
-  animation-delay: var(--tw);
-  transition: transform 160ms;
-}
-
-@keyframes twinkle {
-  50% {
-    opacity: 0.6;
-    transform: scale(0.84);
-  }
-}
-
-.star-name {
-  font-size: var(--fs);
-  color: var(--text);
-  text-shadow: 0 0 12px #000, 0 0 4px #000;
-  transition: color 140ms, text-shadow 140ms;
-}
-
-.star-n {
-  color: var(--gold);
-  font-size: 11px;
-}
-
-.star-btn:hover .star-name,
-.star-btn:focus-visible .star-name {
   color: var(--signal);
+  letter-spacing: 0.16em;
   text-shadow: var(--glow);
 }
 
-.star-btn:hover .star-dot {
-  transform: scale(1.6);
-  animation: none;
+.lost {
+  color: var(--danger);
+  font-size: 12px;
+  text-align: center;
+  text-shadow: 0 0 6px #000;
 }
 
-.star:has(.star-btn:hover) .thread {
-  background: linear-gradient(90deg, transparent 30%, var(--signal) 100%);
-}
-
-.star.is-new .star-dot {
-  animation: nova 1.1s ease-out 5;
-}
-
-@keyframes nova {
-  0% {
-    box-shadow: 0 0 0 0 rgba(255, 213, 0, 0.9), 0 0 20px var(--signal);
-  }
-  100% {
-    box-shadow: 0 0 0 44px rgba(255, 213, 0, 0), 0 0 20px var(--signal);
-  }
-}
-
-@supports not (width: hypot(1px, 1px)) {
-  .thread {
-    display: none;
-  }
-}
-
-/* Phone fallback for the constellation: the sites as a line of light. */
-.star-list {
-  display: none;
-}
-
-/* ─── Transmission ──────────────────────────────────────── */
+/* ─── Transmission: text floating over the left of the swarm ─ */
 
 .transmission {
-  width: min(900px, 100%);
-  padding: 72px 24px 140px;
-  scroll-margin-top: 24px;
+  position: absolute;
+  top: 110px;
+  bottom: 60px;
+  right: 40px;
+  width: min(560px, 40vw);
+  overflow-y: auto;
+  padding: 8px 18px 40px 0;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 28px, #000 calc(100% - 48px), transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 28px, #000 calc(100% - 48px), transparent 100%);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 213, 0, 0.35) transparent;
+}
+
+.tx-close {
+  position: sticky;
+  top: 0;
+  float: right;
+  padding: 0 4px;
+  background: none;
+  border: 0;
+  color: var(--faint);
+  font-size: 20px;
+  cursor: pointer;
+}
+
+.tx-close:hover {
+  color: var(--signal);
 }
 
 .tx {
   animation: decode 320ms ease-out both;
   white-space: pre-wrap;
   word-break: break-word;
+  text-shadow: 0 0 10px #000, 0 0 2px #000;
 }
 
 @keyframes decode {
@@ -666,29 +445,26 @@ mark {
 
 .tx-echo {
   color: var(--gold);
-  font-size: 13px;
 }
 
 .tx-head {
-  margin: 10px 0 14px;
+  margin: 8px 0 12px;
   font-family: var(--font-head);
   font-weight: 400;
-  font-size: clamp(26px, 4vw, 44px);
+  font-size: clamp(24px, 3vw, 36px);
   line-height: 1.05;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.1em;
   color: var(--signal);
   text-shadow: 0 0 10px rgba(255, 213, 0, 0.8), 0 0 40px rgba(255, 213, 0, 0.35);
 }
 
 .tx-ok {
-  margin-bottom: 14px;
+  margin-bottom: 12px;
   color: var(--hot);
-  text-shadow: var(--glow-sm);
 }
 
 .tx-err {
   color: var(--danger);
-  text-shadow: 0 0 10px rgba(255, 77, 61, 0.6);
   font-size: 15px;
 }
 
@@ -698,14 +474,14 @@ mark {
 }
 
 .tx-sys {
-  margin-top: 16px;
+  margin-top: 14px;
   color: var(--faint);
 }
 
 .tx-row {
   display: grid;
-  gap: 16px;
-  padding: 4px 0;
+  gap: 14px;
+  padding: 3px 0;
   white-space: nowrap;
 }
 
@@ -737,27 +513,23 @@ mark {
 
 .tx-source {
   display: grid;
-  grid-template-columns: 40px minmax(0, 1fr);
-  margin-top: 26px;
+  grid-template-columns: 36px minmax(0, 1fr);
+  margin-top: 22px;
 }
 
 .src-n {
   grid-row: span 2;
   font-family: var(--font-head);
-  font-size: 24px;
-  line-height: 26px;
+  font-size: 22px;
+  line-height: 24px;
   color: var(--gold);
 }
 
 .tx-source a {
   color: var(--signal);
-  font-size: 16px;
+  font-size: 15px;
   text-decoration: none;
   text-shadow: var(--glow-sm);
-}
-
-.tx-source a:hover {
-  text-shadow: var(--glow);
 }
 
 .src-url {
@@ -769,22 +541,21 @@ mark {
 }
 
 .tx-passage {
-  margin: 8px 0 0 40px;
+  margin: 6px 0 0 36px;
   color: var(--muted);
-  line-height: 22px;
+  line-height: 21px;
 }
 
 .tx-code {
-  margin: 10px 0 0 40px;
-  padding: 2px 0 2px 16px;
-  max-height: 260px;
+  margin: 10px 0 0 36px;
+  padding: 2px 0 2px 14px;
+  max-height: 220px;
   overflow: auto;
   border-left: 1px solid var(--signal);
-  box-shadow: -1px 0 10px -2px rgba(255, 213, 0, 0.6);
   color: var(--hot);
   font-family: var(--font);
   font-size: 12px;
-  line-height: 19px;
+  line-height: 18px;
   white-space: pre;
 }
 
@@ -792,7 +563,7 @@ mark {
   display: flex;
   flex-wrap: wrap;
   gap: 8px 22px;
-  margin-top: 26px;
+  margin-top: 22px;
 }
 
 .glow-link {
@@ -803,7 +574,6 @@ mark {
   text-decoration: none;
   cursor: pointer;
   text-shadow: var(--glow-sm);
-  transition: text-shadow 140ms, color 140ms;
 }
 
 .glow-link::before {
@@ -811,65 +581,17 @@ mark {
   color: var(--gold);
 }
 
-.glow-link:hover:not(:disabled) {
+.glow-link:hover {
   color: var(--hot);
   text-shadow: var(--glow);
 }
 
-.glow-link:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
+/* ─── Phone ─────────────────────────────────────────────── */
 
-.lost {
-  margin-top: 28px;
-  color: var(--danger);
-  text-align: center;
-}
-
-/* ─── Narrow screens: no orbit, the sites become a line of light ─ */
-
-@media (max-width: 900px) {
-  .constellation {
-    display: none;
-  }
-
-  .star-list {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: center;
-    gap: 8px 20px;
-    max-width: 640px;
-    margin-top: 28px;
-    padding: 0 20px;
-  }
-
-  .star-list .num {
-    color: var(--gold);
-  }
-
-  :root {
-    --sig: min(78vw, 420px);
-  }
-
-  .signal {
-    margin-top: 96px;
-  }
-}
-
-@media (max-width: 600px) {
+@media (max-width: 760px) {
   .mark {
     top: 16px;
     left: 16px;
-  }
-
-  .uplink {
-    top: 20px;
-    right: 16px;
-  }
-
-  .uplink-url {
-    display: none;
   }
 
   .mark-name {
@@ -877,17 +599,48 @@ mark {
     letter-spacing: 0.22em;
   }
 
-  /* On a phone the status is the dot alone; the ring's top arc says it in words. */
-  .uplink-word {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip: rect(0, 0, 0, 0);
+  .uplink {
+    top: 20px;
+    right: 16px;
   }
 
-  .hints button {
-    font-size: 11px;
+  .uplink-word,
+  .uplink-url {
+    display: none;
+  }
+
+  .views {
+    top: auto;
+    bottom: 24px;
+    right: 50%;
+    transform: translateX(50%);
+  }
+
+  .command {
+    width: 84vw;
+  }
+
+  .command-line input {
+    font-size: 15px;
+  }
+
+  .command-line::before {
+    inset: 8px -6px;
+  }
+
+  .hints button:nth-child(n + 3) {
+    display: none;
+  }
+
+  /* The transmission rises as a sheet over the lower half. */
+  .transmission {
+    top: auto;
+    bottom: 56px;
+    left: 16px;
+    right: 16px;
+    width: auto;
+    max-height: 44vh;
+    padding-right: 4px;
   }
 
   .tx-row {
