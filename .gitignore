@@ -11,6 +11,7 @@ downloads/
 eggs/
 .eggs/
 lib/
+!frontend/lib/
 lib64/
 parts/
 sdist/
@@ -34,6 +35,12 @@ instance/
 *.sqlite
 *.sqlite3
 backend/db/*.db
+# SQLite WAL sidecar files
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite-shm
+*.sqlite-wal
 
 # Environment
 .env
@@ -71,6 +78,9 @@ Thumbs.db
 *.bak
 test_*.db
 /tmp/
+
+# tasteskill working files (screenshots, direction sheets)
+.taste-skill/
 
 # Legacy
 *_legacy.*

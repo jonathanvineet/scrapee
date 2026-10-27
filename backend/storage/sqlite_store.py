@@ -1,5 +1,6 @@
 """SQLite-backed storage and FTS5 search for the MCP server."""
 import json
+import math
 import os
 import re
 import sqlite3
@@ -7,6 +8,7 @@ import threading
 from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 try:
     import redis
@@ -100,6 +102,12 @@ class SQLiteStore:
         if self.db_path != ":memory:":
             self.conn.execute("PRAGMA journal_mode = WAL")
         self.conn.execute("PRAGMA synchronous = NORMAL")
+        # This connection is shared across the Flask request threads AND the
+        # background auto-crawler thread. Serialise writers so an interrupted
+        # write (or a WAL checkpoint race) can't surface as "database disk
+        # image is malformed", and wait rather than fail on a busy lock.
+        self.conn.execute("PRAGMA busy_timeout = 8000")
+        self._write_lock = threading.RLock()
         self._init_schema()
         print(f"✓ SQLite initialized: {self.db_path}")
 
@@ -142,11 +150,114 @@ class SQLiteStore:
             except Exception as e:
                 print(f"⚠ Failed to push DB to Redis: {e}")
 
+    # ------------------------------------------------------------------
+    # Schema versioning & migrations
+    # ------------------------------------------------------------------
+    # Bump SCHEMA_VERSION whenever the on-disk schema changes and add a
+    # matching entry to _MIGRATIONS. Steps are ordered, idempotent, and safe
+    # to re-run: each is applied once per version gap, then PRAGMA
+    # user_version is stamped so subsequent starts skip it.
+    #
+    #   v1  rowid-backed FTS layout (docs.id, code_blocks.doc_id,
+    #       doc_topics.doc_id) replacing the legacy url-keyed tables
+    #   v2  docs.score column + idx_docs_score (adaptive ranking)
+    SCHEMA_VERSION = 2
+
+    # Columns added after a given schema version shipped. Existing databases
+    # predate them, so ``CREATE TABLE IF NOT EXISTS`` is a no-op and anything
+    # referencing these columns (indexes, queries) would fail until we
+    # backfill them with ALTER TABLE.
+    _ADDED_COLUMNS = {
+        "docs": {
+            "score": "REAL DEFAULT 1.0",
+        },
+    }
+
     def _init_schema(self):
-        """Create or migrate the schema to the rowid-backed FTS layout."""
+        """Create or migrate the schema, guarding the connection on failure."""
+        try:
+            self._run_migrations()
+        except Exception as exc:
+            print(f"⚠ SQLite schema migration failed: {exc}")
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+            raise
+
+    def _get_user_version(self) -> int:
+        row = self.conn.execute("PRAGMA user_version").fetchone()
+        return int(row[0]) if row else 0
+
+    def _set_user_version(self, version: int) -> None:
+        # PRAGMA does not accept bound parameters; version is a trusted int.
+        self.conn.execute(f"PRAGMA user_version = {int(version)}")
+        self.conn.commit()
+
+    def _run_migrations(self) -> None:
+        """Bring any database (fresh, legacy, or current) up to SCHEMA_VERSION."""
+        # Brand-new database: build the latest schema directly and stamp it.
+        if not self._table_exists("docs"):
+            self._create_schema()
+            self._set_user_version(self.SCHEMA_VERSION)
+            return
+
+        current = self._get_user_version()
+        if current == 0:
+            # Predates PRAGMA user_version stamping — infer where it sits.
+            current = self._infer_baseline_version()
+
+        for target in range(current + 1, self.SCHEMA_VERSION + 1):
+            step = self._MIGRATIONS.get(target)
+            if step is not None:
+                print(f"→ SQLite migration: applying schema v{target}")
+                step(self)
+            self._set_user_version(target)
+
+        # Idempotent safety net: ensure every table/index in the current
+        # schema exists (covers additive changes with no dedicated step).
+        self._create_schema()
+        if self._get_user_version() != self.SCHEMA_VERSION:
+            self._set_user_version(self.SCHEMA_VERSION)
+
+    def _infer_baseline_version(self) -> int:
+        """Best-effort schema version for a DB whose user_version is still 0."""
+        if self._needs_migration():
+            return 0  # pre-v1: legacy url-keyed tables, needs full rebuild
+        if "score" not in self._table_columns("docs"):
+            return 1  # rowid layout present, score column not yet added
+        return 2
+
+    def _migration_v1(self) -> None:
+        """Rebuild legacy url-keyed tables into the rowid-backed FTS layout."""
         if self._needs_migration():
             self._migrate_legacy_schema()
-        self._create_schema()
+
+    def _migration_v2(self) -> None:
+        """Add columns introduced after the rowid layout (docs.score, ...)."""
+        self._migrate_columns()
+
+    _MIGRATIONS = {
+        1: _migration_v1,
+        2: _migration_v2,
+    }
+
+    def _migrate_columns(self) -> None:
+        """Add any missing columns from _ADDED_COLUMNS via ALTER TABLE."""
+        cursor = self.conn.cursor()
+        changed = False
+        for table, columns in self._ADDED_COLUMNS.items():
+            if not self._table_exists(table):
+                continue
+            existing = set(self._table_columns(table))
+            for name, definition in columns.items():
+                if name in existing:
+                    continue
+                cursor.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+                changed = True
+                print(f"✓ SQLite migration: added {table}.{name}")
+        if changed:
+            self.conn.commit()
 
     def _create_schema(self):
         cursor = self.conn.cursor()
@@ -324,8 +435,9 @@ class SQLiteStore:
         """
         metadata = metadata or {}
 
-        # � CRITICAL NORMALIZATION
-        content = (content or "").lower().strip()
+        # FTS5 (unicode61) is case-insensitive already; keep the original case
+        # so code identifiers like useState survive intact.
+        content = (content or "").strip()
         
         # 🚨 HARD VALIDATION — skip low-quality content
         if len(content) < 50:
@@ -336,8 +448,10 @@ class SQLiteStore:
             print(f"[SKIP] No useful data: {url}")
             return False
 
+        self._write_lock.acquire()
         try:
-            title = metadata.get("title", "")
+            # Sphinx and MkDocs append a permalink pilcrow to headings.
+            title = re.sub(r"\s+", " ", (metadata.get("title") or "").replace("¶", "")).strip()
             domain = self._extract_domain(url)
             language = metadata.get("language", "")
             scraped_at = datetime.utcnow().isoformat()
@@ -476,9 +590,14 @@ class SQLiteStore:
             
         except Exception as e:
             print(f"Error saving doc {url}: {e}")
-            self.conn.rollback()
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
             return False
-    
+        finally:
+            self._write_lock.release()
+
     def get_doc(self, url: str) -> Optional[Dict]:
         """
         Retrieve document by URL.
@@ -658,126 +777,114 @@ class SQLiteStore:
         scored_results.sort(key=lambda x: x['score'], reverse=True)
         return scored_results[:limit]
     
+    # Words too common in docs to discriminate between pages.
+    _SEARCH_STOPWORDS = frozenset({
+        "a", "an", "and", "are", "as", "at", "be", "by", "can", "do", "does", "for",
+        "from", "how", "i", "in", "is", "it", "of", "on", "or", "the", "to", "use",
+        "using", "what", "when", "where", "which", "why", "with", "you", "my",
+    })
+
+    def _fts_terms(self, query: str) -> List[str]:
+        words = re.findall(r"[a-z0-9_]+", query.lower())
+        terms = [w for w in words if w not in self._SEARCH_STOPWORDS and len(w) > 1]
+        return terms or [w for w in words if len(w) > 1]
+
     def search_docs(self, query: str, limit: int = 10) -> List[Dict]:
-        """🔥 RULE 3: 3-tier search fallback — NEVER RETURN EMPTY.
-        
-        Tier 1: FTS with expansion (fast, precise)
-        Tier 2: LIKE fallback (comprehensive)
-        Tier 3: Recent docs (last resort, always returns something)
+        """Relevance-ranked search over stored docs.
+
+        Tier 1: FTS5 with every term required (AND), ranked by BM25.
+        Tier 2: FTS5 with any term (OR), ranked by BM25.
+        Tier 3: LIKE substring match on the whole query.
+
+        Returns an empty list when nothing matches — callers use that to
+        decide whether to crawl, so never pad it with unrelated docs.
+        Each row carries ``relevance`` (higher is better) and ``final_score``
+        (relevance plus learned feedback).
         """
-        query = query.lower()
+        query = (query or "").lower().strip()
+        terms = self._fts_terms(query)
+        if not terms:
+            return []
         cursor = self.conn.cursor()
-        
-        # TIER 1: FTS with expansion (word* wildcard)
-        fts_query = " OR ".join([f"{w}*" for w in query.split()])
-        print(f"[SEARCH] T1-FTS: {fts_query!r}")
-        
-        try:
-            cursor.execute(
-                """
-                SELECT d.id, d.url, d.title,
-                       snippet(docs_fts, 1, '[', ']', '...', 32) AS snippet,
-                       bm25(docs_fts) AS fts_score,
-                       d.score AS learned_score
-                FROM docs_fts
-                JOIN docs d ON docs_fts.rowid = d.id
-                WHERE docs_fts MATCH ?
-                LIMIT ?
-                """,
-                (fts_query, limit),
-            )
-            rows = [dict(row) for row in cursor.fetchall()]
-            print(f"[SEARCH] T1-FTS found {len(rows)}")
 
-            results = []
+        # The OR tier must still cover most of the query: a page that merely
+        # mentions one word ("tailwind") is not an answer to the whole question.
+        min_cover = math.ceil(len(terms) * 0.6)
+        for joiner in (" AND ", " OR "):
+            if joiner == " OR " and min_cover >= len(terms):
+                break
+            fts_query = joiner.join(f'"{t}"*' for t in terms)
+            try:
+                cursor.execute(
+                    """
+                    SELECT d.id, d.url, d.title, d.scraped_at, d.content,
+                           snippet(docs_fts, 1, '[', ']', '...', 48) AS snippet,
+                           bm25(docs_fts, 4.0, 1.0) AS fts_score,
+                           d.score AS learned_score
+                    FROM docs_fts
+                    JOIN docs d ON docs_fts.rowid = d.id
+                    WHERE docs_fts MATCH ?
+                    ORDER BY fts_score
+                    LIMIT ?
+                    """,
+                    (fts_query, limit * 3 if joiner == " OR " else limit),
+                )
+                rows = [dict(row) for row in cursor.fetchall()]
+            except Exception as e:
+                print(f"[SEARCH] FTS failed for {fts_query!r}: {e}")
+                rows = []
+            if joiner == " OR ":
+                # The rarest term is usually the subject (a library or API
+                # name), so a match without it is about something else.
+                rarest = min(terms, key=lambda t: self._term_doc_frequency(cursor, t))
+                kept = []
+                for r in rows:
+                    text = f"{r['title']} {r['content']}".lower()
+                    if rarest in text and sum(1 for t in terms if t in text) >= min_cover:
+                        kept.append(r)
+                rows = kept[:limit]
             for r in rows:
-                fts = float(r.get("fts_score") or 0.0)
-                learned = float(r.get("learned_score") or 1.0)
-                # Combine scores: learned score + inverted fts similarity
-                combined = learned + (1.0 / (fts + 1.0))
-                # Query-source affinity boost
-                try:
-                    affinity = self.get_query_source_affinity(query, r.get("url"))
-                    if affinity > 0:
-                        combined += 0.5
-                except Exception:
-                    pass
+                r.pop("content", None)
+            if rows:
+                return self._score_search_rows(query, rows, from_fts=True)
 
-                r["final_score"] = combined
-                results.append(r)
-
-            # Sort by combined score descending
-            results.sort(key=lambda x: x.get("final_score", 0.0), reverse=True)
-
-            if results:
-                return results
-        except Exception as e:
-            print(f"[SEARCH] T1-FTS failed: {e}")
-        
-        # TIER 2: LIKE fallback (always runs)
-        like_query = f"%{query}%"
-        print(f"[SEARCH] T2-LIKE: {like_query!r}")
-        
         cursor.execute(
             """
-            SELECT id, url, title, substr(content, 1, 300) AS snippet, score AS learned_score
+            SELECT id, url, title, scraped_at, substr(content, 1, 300) AS snippet,
+                   score AS learned_score
             FROM docs
             WHERE content LIKE ?
             LIMIT ?
             """,
-            (like_query, limit),
+            (f"%{query}%", limit),
         )
         rows = [dict(row) for row in cursor.fetchall()]
-        print(f"[SEARCH] T2-LIKE found {len(rows)}")
+        return self._score_search_rows(query, rows, from_fts=False)
 
-        if rows:
-            results = []
-            for r in rows:
-                learned = float(r.get("learned_score") or 1.0)
-                # LIKE fallback has no fts_score; use learned as primary
-                combined = learned
-                try:
-                    affinity = self.get_query_source_affinity(query, r.get("url"))
-                    if affinity > 0:
-                        combined += 0.5
-                except Exception:
-                    pass
-                r["final_score"] = combined
-                results.append(r)
+    def _term_doc_frequency(self, cursor, term: str) -> int:
+        try:
+            return cursor.execute(
+                "SELECT count(*) FROM docs_fts WHERE docs_fts MATCH ?", (f'"{term}"*',)
+            ).fetchone()[0]
+        except Exception:
+            return 0
 
-            results.sort(key=lambda x: x.get("final_score", 0.0), reverse=True)
-            return results
-        
-        # TIER 3: Last resort — recent docs (ALWAYS returns something)
-        print(f"[SEARCH] T3-RECENT fallback")
-        cursor.execute(
-            """
-            SELECT id, url, title, substr(content, 1, 300) AS snippet, score AS learned_score
-            FROM docs
-            ORDER BY scraped_at DESC, id DESC
-            LIMIT ?
-            """,
-            (limit,),
-        )
-        rows = [dict(row) for row in cursor.fetchall()]
-        print(f"[SEARCH] T3-RECENT found {len(rows)}")
-
-        results = []
+    def _score_search_rows(self, query: str, rows: List[Dict], from_fts: bool) -> List[Dict]:
         for r in rows:
+            # bm25() is negative; more negative means a better match.
+            relevance = -float(r.get("fts_score") or 0.0) if from_fts else 1.0
             learned = float(r.get("learned_score") or 1.0)
-            combined = learned
+            combined = relevance + (learned - 1.0) * 0.5
             try:
-                affinity = self.get_query_source_affinity(query, r.get("url"))
-                if affinity > 0:
+                if self.get_query_source_affinity(query, r.get("url")) > 0:
                     combined += 0.5
             except Exception:
                 pass
+            r["relevance"] = relevance
             r["final_score"] = combined
-            results.append(r)
-
-        results.sort(key=lambda x: x.get("final_score", 0.0), reverse=True)
-        return results
-
+            r["domain"] = urlparse(r.get("url") or "").netloc
+        rows.sort(key=lambda x: x["final_score"], reverse=True)
+        return rows
 
     def search_and_get(self, query: str, limit: int = 5, snippet_length: int = 400) -> List[Dict]:
         results = self.search_docs(query, limit=limit)
@@ -791,7 +898,8 @@ class SQLiteStore:
                     "url": row.get("url", ""),
                     "title": row.get("title", "") or row.get("url", ""),
                     "snippet": snippet,
-                    "score": row.get("score", 0.0),
+                    "domain": row.get("domain", ""),
+                    "score": row.get("final_score", 0.0),
                 }
             )
         return payload
@@ -1054,20 +1162,21 @@ class SQLiteStore:
     def upsert_scrape_job(self, query: str, status: str) -> None:
         """Create or update a scrape job (RUNNING, COMPLETED, or FAILED)."""
         from datetime import datetime
-        cursor = self.conn.cursor()
         now = datetime.utcnow().isoformat()
-        
-        cursor.execute(
-            """
-            INSERT INTO scrape_jobs (query, status, updated_at, created_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(query) DO UPDATE SET
-                status = excluded.status,
-                updated_at = excluded.updated_at
-            """,
-            (query, status, now, now)
-        )
-        self.conn.commit()
+
+        with self._write_lock:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO scrape_jobs (query, status, updated_at, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(query) DO UPDATE SET
+                    status = excluded.status,
+                    updated_at = excluded.updated_at
+                """,
+                (query, status, now, now)
+            )
+            self.conn.commit()
 
     def clear_stale_scrape_jobs(self, older_than_hours: int = 24) -> int:
         """Clear scrape jobs older than N hours."""
@@ -1117,6 +1226,40 @@ class SQLiteStore:
             "sqlite_ok": sqlite_ok,
             "db_path": self.db_path,
         }
+
+    def list_sources(self) -> List[Dict]:
+        """One row per indexed domain: page and code counts, last crawl time."""
+        cursor = self.conn.cursor()
+        rows = cursor.execute(
+            """
+            SELECT d.domain AS domain,
+                   COUNT(DISTINCT d.id) AS docs,
+                   COUNT(c.id) AS code_blocks,
+                   MAX(d.scraped_at) AS last_scraped,
+                   MIN(d.url) AS sample_url
+            FROM docs d
+            LEFT JOIN code_blocks c ON c.doc_id = d.id
+            WHERE d.domain IS NOT NULL AND d.domain != ''
+            GROUP BY d.domain
+            ORDER BY last_scraped DESC
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_source_docs(self, domain: str, limit: int = 200) -> List[Dict]:
+        cursor = self.conn.cursor()
+        rows = cursor.execute(
+            """
+            SELECT d.url, d.title, d.scraped_at, LENGTH(d.content) AS chars,
+                   (SELECT COUNT(*) FROM code_blocks c WHERE c.doc_id = d.id) AS code_blocks
+            FROM docs d
+            WHERE d.domain = ?
+            ORDER BY d.url
+            LIMIT ?
+            """,
+            (domain, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def _prepare_fts_query(self, query: str) -> str:
         """Prepare an FTS5 query with both AND and OR operators for better matching."""
@@ -1226,55 +1369,51 @@ class SQLiteStore:
         rows = cursor.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
 
+    def _delete_where(self, where: str, params: tuple = ()) -> int:
+        """Delete the docs matching ``where`` with their code, topics and FTS rows."""
+        with self._write_lock:
+            cursor = self.conn.cursor()
+            rows = cursor.execute(f"SELECT id, url FROM docs WHERE {where}", params).fetchall()
+            doc_ids = [row["id"] for row in rows]
+            if self.redis_client and rows:
+                try:
+                    self.redis_client.delete(*[f"doc:{row['url']}" for row in rows])
+                except Exception as e:
+                    print(f"⚠ Redis delete error: {e}")
+            for doc_id in doc_ids:
+                code_ids = [(r["id"],) for r in cursor.execute("SELECT id FROM code_blocks WHERE doc_id = ?", (doc_id,))]
+                cursor.executemany("DELETE FROM code_fts WHERE rowid = ?", code_ids)
+                cursor.execute("DELETE FROM code_blocks WHERE doc_id = ?", (doc_id,))
+                cursor.execute("DELETE FROM doc_topics WHERE doc_id = ?", (doc_id,))
+                cursor.execute("DELETE FROM docs_fts WHERE rowid = ?", (doc_id,))
+                cursor.execute("DELETE FROM docs WHERE id = ?", (doc_id,))
+            self.conn.commit()
+        if doc_ids:
+            self._push_to_redis()
+        return len(doc_ids)
+
     def delete_document(self, url: str) -> bool:
         """Delete a document by URL."""
-        cursor = self.conn.cursor()
-        doc = cursor.execute("SELECT id FROM docs WHERE url = ?", (url,)).fetchone()
-        if not doc:
-            return False
-        
-        doc_id = doc["id"]
-        cursor.execute("DELETE FROM code_blocks WHERE doc_id = ?", (doc_id,))
-        cursor.execute("DELETE FROM doc_topics WHERE doc_id = ?", (doc_id,))
-        cursor.execute("DELETE FROM docs WHERE id = ?", (doc_id,))
-        self.conn.commit()
-        return True
+        return self._delete_where("url = ?", (url,)) > 0
 
     def delete_old_documents(self, older_than_days: int) -> int:
         """Delete documents older than N days."""
         from datetime import datetime, timedelta
         cutoff_date = (datetime.utcnow() - timedelta(days=older_than_days)).isoformat()
-        
-        cursor = self.conn.cursor()
-        doc_ids = cursor.execute("SELECT id FROM docs WHERE scraped_at < ?", (cutoff_date,)).fetchall()
-        
-        deleted_count = 0
-        for row in doc_ids:
-            doc_id = row["id"]
-            cursor.execute("DELETE FROM code_blocks WHERE doc_id = ?", (doc_id,))
-            cursor.execute("DELETE FROM doc_topics WHERE doc_id = ?", (doc_id,))
-            cursor.execute("DELETE FROM docs WHERE id = ?", (doc_id,))
-            deleted_count += 1
-        
-        self.conn.commit()
-        return deleted_count
+        return self._delete_where("scraped_at < ?", (cutoff_date,))
 
     def delete_domain_documents(self, domain: str) -> int:
         """Delete all documents from a domain."""
-        cursor = self.conn.cursor()
-        doc_ids = cursor.execute("SELECT id FROM docs WHERE domain = ? OR url LIKE ?", 
-                                (domain, f"%{domain}%")).fetchall()
-        
-        deleted_count = 0
-        for row in doc_ids:
-            doc_id = row["id"]
-            cursor.execute("DELETE FROM code_blocks WHERE doc_id = ?", (doc_id,))
-            cursor.execute("DELETE FROM doc_topics WHERE doc_id = ?", (doc_id,))
-            cursor.execute("DELETE FROM docs WHERE id = ?", (doc_id,))
-            deleted_count += 1
-        
-        self.conn.commit()
-        return deleted_count
+        return self._delete_where("domain = ?", (domain,))
+
+    def delete_all_documents(self) -> int:
+        """Empty the index (docs, code, topics, FTS, learned feedback)."""
+        deleted = self._delete_where("1 = 1")
+        with self._write_lock:
+            self.conn.execute("DELETE FROM query_source_map")
+            self.conn.execute("DELETE FROM scrape_jobs")
+            self.conn.commit()
+        return deleted
 
     def get_detailed_stats(self) -> Dict:
         """Get detailed index statistics."""
@@ -1346,33 +1485,36 @@ class SQLiteStore:
             success: True if user accepted/used answer, False if they rejected/re-asked
         """
         delta = 0.2 if success else -0.2
-        
-        cursor = self.conn.cursor()
-        
-        for url in urls:
-            # Update source score (learned preference)
-            cursor.execute("""
-                UPDATE docs 
-                SET score = MAX(0.1, MIN(5.0, score + ?))
-                WHERE url = ?
-            """, (delta, url))
-            
-            # Record query-source mapping (for personalization)
-            action = "INSERT OR IGNORE" if success else "INSERT"
-            if success:
-                cursor.execute("""
-                    INSERT INTO query_source_map (query, url, success_count) 
-                    VALUES (?, ?, 1)
-                    ON CONFLICT(query, url) DO UPDATE SET success_count = success_count + 1
-                """, (query, url))
-            else:
-                cursor.execute("""
-                    INSERT INTO query_source_map (query, url, failure_count)
-                    VALUES (?, ?, 1)
-                    ON CONFLICT(query, url) DO UPDATE SET failure_count = failure_count + 1
-                """, (query, url))
-        
-        self.conn.commit()
+
+        with self._write_lock:
+            cursor = self.conn.cursor()
+            try:
+                for url in urls:
+                    # Update source score (learned preference)
+                    cursor.execute("""
+                        UPDATE docs
+                        SET score = MAX(0.1, MIN(5.0, score + ?))
+                        WHERE url = ?
+                    """, (delta, url))
+
+                    # Record query-source mapping (for personalization)
+                    if success:
+                        cursor.execute("""
+                            INSERT INTO query_source_map (query, url, success_count)
+                            VALUES (?, ?, 1)
+                            ON CONFLICT(query, url) DO UPDATE SET success_count = success_count + 1
+                        """, (query, url))
+                    else:
+                        cursor.execute("""
+                            INSERT INTO query_source_map (query, url, failure_count)
+                            VALUES (?, ?, 1)
+                            ON CONFLICT(query, url) DO UPDATE SET failure_count = failure_count + 1
+                        """, (query, url))
+
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
         print(f"[LEARNING] Updated scores for {len(urls)} sources (success={success})")
 
     def get_source_score(self, url: str) -> float:

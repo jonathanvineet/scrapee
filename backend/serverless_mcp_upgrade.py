@@ -55,7 +55,7 @@ class ThreadSafeCacheLayer:
             self.hits += 1
             return value
 
-    def set(self, key: str, value: Any) -> None:
+    def set(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
         with self._lock:
             # Evict oldest if at capacity
             if len(self._cache) >= self.max_entries:
@@ -65,7 +65,7 @@ class ThreadSafeCacheLayer:
                 )
                 del self._cache[oldest_key]
             
-            self._cache[key] = (time.monotonic() + self.ttl_seconds, value)
+            self._cache[key] = (time.monotonic() + (ttl or self.ttl_seconds), value)
 
     def clear(self) -> None:
         with self._lock:
@@ -154,80 +154,77 @@ def should_scrape_query(store, query: str) -> bool:
 # 3. NON-BLOCKING BACKGROUND SCRAPE TRIGGER
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Queries with a scrape currently in flight. Shared by the HTTP transport
+# (app.py) and the in-process path below so a repeated question never starts a
+# duplicate crawl.
+SCRAPE_IN_PROGRESS: set = set()
+
+
+def _scrape_in_process(query: str, urls: List[str], store=None) -> None:
+    """Local / stdio path: crawl on this process's own thread."""
+    try:
+        from mcp_engine import mcp_server
+        for url in urls:
+            try:
+                mcp_server._tool_scrape_url({"url": url, "mode": "smart", "max_depth": 1})
+            except Exception as e:
+                print(f"[Background] ❌ Failed to scrape {url}: {e}")
+        mcp_server.cache.clear()
+        if store:
+            store.upsert_scrape_job(query, "completed")
+    except Exception as e:
+        print(f"[Background] ❌ In-process scrape failed: {e}")
+    finally:
+        SCRAPE_IN_PROGRESS.discard(query)
+
+
 def trigger_background_scrape(query: str, urls: Optional[List[str]] = None, store=None) -> bool:
     """
     Fire-and-forget background scrape with duplicate prevention.
-    
-    VERCEL-SAFE:
-    - Uses direct HTTP POST (not threading)
-    - True fire-and-forget (minimal timeout = instant return)
-    - 0.001s timeout ensures response returns immediately
-    - Never blocks the request thread
-    - Prevents duplicate concurrent scrapes via global lock
-    
-    Args:
-        query: User query (for logging)
-        urls: List of URLs to scrape (limited to 2)
-        store: SQLiteStore for marking job as RUNNING
-    
-    Returns:
-        True if POST sent, False if exception or already in progress
+
+    - BASE_URL set (Vercel): POST to /api/internal/background_scrape with a
+      ~1ms timeout so the current request returns immediately.
+    - BASE_URL unset (local Flask, stdio): crawl on a daemon thread in this
+      process.
+
+    Returns True if a scrape was started, False if one is already running for
+    this query or nothing could be started.
     """
+    urls = (urls or [])[:2]  # LIMIT: Only 2 URLs
+    if not urls:
+        return False
+    if query in SCRAPE_IN_PROGRESS:
+        print(f"[Background] ⏭️  Scrape already in progress for: {query}")
+        return False
+    SCRAPE_IN_PROGRESS.add(query)
+
+    if store:
+        try:
+            store.upsert_scrape_job(query, "running")
+        except Exception as e:
+            print(f"[Background] Failed to mark job RUNNING: {e}")
+
+    base_url = os.getenv("BASE_URL")
     try:
-        # ─ CHECK LOCK: Prevent duplicate concurrent scrapes ─
-        # This is set globally at app startup and checked here
-        # If query is already being scraped, skip
-        from app import SCRAPE_IN_PROGRESS
-        
-        if query in SCRAPE_IN_PROGRESS:
-            print(f"[Background] ⏭️  Scrape already in progress for: {query}")
-            return False
-        
-        # Add to lock
-        SCRAPE_IN_PROGRESS.add(query)
-        
-        base_url = os.getenv("BASE_URL")
         if not base_url:
-            print(f"[Background] BASE_URL not set, skipping")
-            SCRAPE_IN_PROGRESS.discard(query)
-            return False
-        
-        # Mark scrape job as RUNNING (prevents duplicate scrapes)
-        if store:
-            try:
-                store.upsert_scrape_job(query, "running")
-            except Exception as e:
-                print(f"[Background] Failed to mark job RUNNING: {e}")
-        
-        endpoint = f"{base_url}/api/internal/background_scrape"
-        payload = {
-            "query": query,
-            "urls": urls[:2] if urls else []  # LIMIT: Only 2 URLs
-        }
-        
-        # CRITICAL: 0.001s timeout = truly non-blocking fire-and-forget
-        # This ensures user response returns immediately, no blocking
+            threading.Thread(target=_scrape_in_process, args=(query, urls, store), daemon=True).start()
+            print(f"[Background] 🔥 In-process scrape started for: {query}")
+            return True
+
         try:
             requests.post(
-                endpoint,
-                json=payload,
-                timeout=0.001  # ← MINIMAL: ~1ms
+                f"{base_url}/api/internal/background_scrape",
+                json={"query": query, "urls": urls},
+                timeout=0.001,  # ← MINIMAL: ~1ms, don't wait for the crawl
             )
         except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
-            # Timeout/connection errors are expected with 1ms timeout
-            # This is intentional - we don't wait for success confirmation
+            # Expected with a 1ms timeout — the request was still sent.
             pass
-        
         print(f"[Background] 🔥 Fire-and-forget sent for: {query}")
         return True
     except Exception as e:
         print(f"[Background] ❌ Scrape trigger failed: {e}")
-        # Clean up lock on error
-        try:
-            from app import SCRAPE_IN_PROGRESS
-            SCRAPE_IN_PROGRESS.discard(query)
-        except:
-            pass
+        SCRAPE_IN_PROGRESS.discard(query)
         return False
 
 

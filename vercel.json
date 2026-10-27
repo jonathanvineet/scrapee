@@ -2,21 +2,22 @@
   "version": 2,
   "builds": [
     {
-      "src": "backend/api/mcp.py",
-      "use": "@vercel/python"
+      "src": "backend/app.py",
+      "use": "@vercel/python",
+      "config": {
+        "maxLambdaSize": "15mb"
+      }
     }
   ],
   "routes": [
     {
-      "src": "/api/(.*)",
-      "dest": "backend/api/mcp.py"
-    },
-    {
       "src": "/(.*)",
-      "dest": "backend/api/mcp.py"
+      "dest": "backend/app.py"
     }
   ],
   "env": {
+    "FLASK_ENV": "production",
+    "PYTHONUNBUFFERED": "1",
     "REDIS_URL": "@redis-url"
   }
 }

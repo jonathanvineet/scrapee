@@ -4,7 +4,7 @@ import sys
 import json
 sys.path.insert(0, '/Users/jonathan/elco/scrapee/backend')
 
-from mcp import mcp_server
+from mcp_engine import mcp_server
 
 print("=" * 60)
 print("STEP 1: Scrape Expo authentication page")

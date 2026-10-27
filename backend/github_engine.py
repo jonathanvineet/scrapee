@@ -14,7 +14,7 @@ Usage:
 import json
 import re
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import requests
@@ -419,7 +419,3 @@ class GitHubRepoEngine:
         if len(parts) < 2:
             return None, None
         return parts[0], parts[1].rstrip(".git")
-
-
-# Type hint fix
-from typing import Tuple

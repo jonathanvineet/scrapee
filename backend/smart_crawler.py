@@ -143,6 +143,24 @@ def _extract_code_blocks(soup: BeautifulSoup) -> list[dict]:
     return scraper._extract_code_blocks(soup, "")  # url param only used for logging
 
 
+_URL_EXT_LANG = {
+    ".py": "python", ".js": "javascript", ".ts": "typescript", ".tsx": "typescript",
+    ".jsx": "javascript", ".rs": "rust", ".go": "go", ".rb": "ruby", ".java": "java",
+    ".c": "c", ".h": "c", ".cpp": "cpp", ".cc": "cpp", ".cs": "csharp", ".sh": "bash",
+    ".json": "json", ".xml": "xml", ".yml": "yaml", ".yaml": "yaml", ".toml": "toml",
+    ".md": "markdown", ".txt": "text",
+}
+
+
+def _guess_lang_from_url(url: str) -> str:
+    """Best-effort language tag for a raw file URL, from its extension."""
+    path = urlparse(url).path.lower()
+    for ext, lang in _URL_EXT_LANG.items():
+        if path.endswith(ext):
+            return lang
+    return "text"
+
+
 def _normalise_url(url: str) -> str:
     """Strip fragment and trailing slash for dedup purposes."""
     p = urlparse(url)
@@ -231,16 +249,25 @@ class SmartCrawler:
         
         Returns a list of ScrapedDocument, sorted by URL score descending.
         """
+        import os
         import time as time_module
-        
-        # HARD LIMITS FOR SERVERLESS
-        MAX_PAGES_HARD = 5     # Reduced from 30 (Vercel safety)
-        MAX_DEPTH_HARD = 1     # Reduced from 3 (shallow crawl)
-        TIME_LIMIT = 8         # 8 second hard timeout
-        
-        # Override parameters with hard limits
-        max_pages = min(max_pages, MAX_PAGES_HARD)
-        max_depth = min(max_depth, MAX_DEPTH_HARD)
+
+        # Serverless (Vercel/Lambda) has a hard ~10-60s function budget, so we
+        # clamp aggressively there. A local/self-hosted run has no such limit —
+        # respect the caller's request up to a generous safety ceiling that the
+        # operator can raise via env vars.
+        on_serverless = bool(
+            os.getenv("VERCEL") or os.getenv("VERCEL_ENV")
+            or os.getenv("AWS_LAMBDA_FUNCTION_NAME") or os.getenv("NOW_REGION")
+        )
+        if on_serverless:
+            max_pages = min(max_pages, 8)
+            max_depth = min(max_depth, 1)
+            TIME_LIMIT = 12
+        else:
+            max_pages = min(max_pages, int(os.getenv("SCRAPEE_MAX_PAGES_CAP", "250")))
+            max_depth = min(max_depth, int(os.getenv("SCRAPEE_MAX_DEPTH_CAP", "5")))
+            TIME_LIMIT = int(os.getenv("SCRAPEE_CRAWL_TIME_LIMIT", "180"))
         
         start_time = time_module.time()
         
@@ -350,14 +377,19 @@ class SmartCrawler:
             if is_raw_text or url.endswith(('.xml', '.json', '.txt', '.py', '.js', '.sh')):
                 # Store raw file content as-is
                 domain = urlparse(url).netloc
+                raw_text = resp.text
                 doc = ScrapedDocument(
                     url=url,
                     title=url.split('/')[-1],  # Filename as title
-                    content=resp.text[:5000],  # First 5000 chars
-                    code_blocks=[],
+                    content=raw_text[:20000],
+                    code_blocks=[{
+                        "snippet": raw_text[:20000],
+                        "language": _guess_lang_from_url(url),
+                        "context": f"raw file {url}",
+                    }],
                     domain=domain,
                     depth=depth,
-                    links=[],  # No links from raw files
+                    score=score,
                 )
                 logger.debug(f"[Raw Content] Stored {len(resp.text)} chars from {url}")
                 return doc, []  # Return doc but no child links

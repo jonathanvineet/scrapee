@@ -6,7 +6,20 @@ import requests
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
-from mcp import (
+# Must be set before torch / sentence-transformers import (via mcp_engine).
+# On macOS's Xcode-bundled Python, PyTorch ships its own libomp while
+# numpy/scipy/sklearn load another — two OpenMP runtimes in one process, which
+# segfaults (exit 139) and leaks semaphores. KMP_DUPLICATE_LIB_OK tolerates it;
+# pinning every math lib to one thread avoids the worker-pool fork hazard.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+os.environ.setdefault("KMP_INIT_AT_FORK", "FALSE")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+from mcp_engine import (
     IMPORT_ERRORS,
     SCRAPE_TIMEOUT_SECONDS,
     SELENIUM_AVAILABLE,
@@ -54,13 +67,38 @@ CORS(
 _import_errors = dict(IMPORT_ERRORS)
 
 # ─── SCRAPE LOCK (Prevent duplicate concurrent scrapes) ──────────────────────
-# Global set tracking queries currently being scraped
+# Global set tracking queries currently being scraped, shared with the MCP
+# engine's trigger_background_scrape.
 # Prevents: User asks → scrape triggers → User asks again → DUPLICATE SCRAPE
-SCRAPE_IN_PROGRESS = set()
+from serverless_mcp_upgrade import SCRAPE_IN_PROGRESS
 
 # ─── HTML parsing helper (used by /api/scrape) ────────────────────────────────
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
+
+# Non-repo GitHub paths that should still be crawled as ordinary pages.
+_GITHUB_NON_REPO = {
+    "", "features", "pricing", "about", "topics", "collections", "trending",
+    "marketplace", "sponsors", "settings", "notifications", "explore",
+    "orgs", "users", "search", "login", "join", "new",
+}
+
+
+def _is_github_repo_url(url: str) -> bool:
+    """True for a github.com/<owner>/<repo> page (repo root or subpage),
+    excluding org pages, gists, raw files and non-repo sections."""
+    try:
+        p = urlparse(url)
+        if p.netloc.lower() not in ("github.com", "www.github.com"):
+            return False
+        parts = [seg for seg in p.path.split("/") if seg]
+        if len(parts) < 2:
+            return False
+        if parts[0].lower() in _GITHUB_NON_REPO:
+            return False
+        return True
+    except Exception:
+        return False
 
 
 def parse_html(url: str, html: str, mode: str) -> dict:
@@ -186,7 +224,7 @@ def scrape():
     if request.method == "OPTIONS":
         return "", 204
 
-    from mcp import SmartCrawler, SeleniumCrawler, UltraFastCrawler
+    from mcp_engine import SmartCrawler, SeleniumCrawler, UltraFastCrawler
 
     try:
         data = request.get_json()
@@ -195,7 +233,13 @@ def scrape():
 
         urls = data.get("urls", [])
         mode = (data.get("mode", "smart") or "smart").strip().lower()
-        max_depth = int(data.get("max_depth", 1))
+        max_depth = int(data.get("max_depth", 2))
+        # How many pages to pull from a single seed. SmartCrawler still applies
+        # its own env-configurable ceiling on top of this.
+        try:
+            max_pages = max(1, min(int(data.get("max_pages", 40)), 250))
+        except (TypeError, ValueError):
+            max_pages = 40
         output_format = data.get("output_format", "json")
 
         if not isinstance(urls, list) or len(urls) == 0:
@@ -214,6 +258,24 @@ def scrape():
                         "status": "failed",
                     })
                     continue
+
+                # ========== GITHUB REPO → dedicated understanding engine ==========
+                # A bare repo landing page (github.com/owner/repo) has almost no
+                # crawlable prose; route it through the repo engine, which reads
+                # the file tree + key files and indexes a synthesized overview.
+                if _is_github_repo_url(start_url) and getattr(mcp_server, "github_engine", None):
+                    repo_res = mcp_server._tool_understand_repo({"repo_url": start_url})
+                    if repo_res.get("status") == "success":
+                        total_pages_scraped += 1
+                        all_results.append({
+                            "url": start_url,
+                            "title": repo_res.get("repo", start_url),
+                            "status": "indexed",
+                            "kind": "github_repo",
+                        })
+                        continue
+                    # Fall through to normal crawl on engine error (e.g. rate limit)
+                    app.logger.warning(f"github engine fallback for {start_url}: {repo_res.get('error')}")
 
                 # ========== CRAWL BASED ON MODE ==========
                 raw_pages = []
@@ -234,7 +296,7 @@ def scrape():
                         return jsonify({"error": "UltraFastCrawler not available", "status": "failed"}), 422
                     crawler = UltraFastCrawler(start_url=start_url, max_depth=max_depth, max_workers=8)
                     # Add max_pages limit to prevent unbounded crawling
-                    crawler.max_pages = 50
+                    crawler.max_pages = max_pages
                     raw = crawler.crawl()
                     # Now returns dicts with structured data {url, title, content, paragraphs, headings, etc}
                     if isinstance(raw, dict):
@@ -247,11 +309,11 @@ def scrape():
                     crawler = SmartCrawler(
                         timeout=15,
                         delay_between_requests=0.3,
-                        min_good_docs=5,
+                        min_good_docs=max_pages,   # don't early-exit before max_pages
                         cross_domain_budget=3,
                     )
                     # SmartCrawler.crawl() returns list[ScrapedDocument] with ContentFilter fields
-                    raw = crawler.crawl(seed_url=start_url, max_pages=30, max_depth=max_depth)
+                    raw = crawler.crawl(seed_url=start_url, max_pages=max_pages, max_depth=max_depth)
                     # Convert ScrapedDocument objects to dicts
                     if isinstance(raw, list):
                         raw_pages = [
@@ -278,24 +340,32 @@ def scrape():
                     })
                     continue
 
-                # Store ALL pages without filtering
                 indexed_count = 0
                 for parsed in raw_pages:
+                    content = parsed.get("content", "") or ""
+                    code_blocks = parsed.get("code_blocks") or []
+                    page = {
+                        "url": parsed.get("url", ""),
+                        "title": parsed.get("title", ""),
+                        "words": len(content.split()),
+                        "code_blocks": len(code_blocks),
+                        "excerpt": " ".join(content.split())[:240],
+                    }
                     try:
-                        doc_id = store.save_doc(
-                            url=parsed.get("url", ""),
-                            content=parsed.get("content", ""),
-                            metadata={"title": parsed.get("title", "")},
+                        saved = store.save_doc(
+                            url=page["url"],
+                            content=content,
+                            metadata={"title": page["title"]},
+                            code_blocks=code_blocks,
                         )
-                        if doc_id:
-                            indexed_count += 1
-                            all_results.append({
-                                "url": parsed.get("url", ""),
-                                "title": parsed.get("title", ""),
-                                "status": "indexed",
-                            })
                     except Exception as store_err:
-                        app.logger.warning(f"Failed to store {parsed.get('url')}: {store_err}")
+                        app.logger.warning(f"Failed to store {page['url']}: {store_err}")
+                        saved = False
+                    if saved:
+                        indexed_count += 1
+                    # save_doc skips thin pages and exact duplicates of a stored page.
+                    page["status"] = "indexed" if saved else "skipped"
+                    all_results.append(page)
 
                 if indexed_count == 0:
                     all_results.append({
@@ -307,6 +377,9 @@ def scrape():
             except Exception as e:
                 app.logger.error(f"Error crawling {start_url}: {e}")
                 all_results.append({"url": start_url, "error": str(e), "status": "error"})
+
+        # Cached get_context answers predate these pages.
+        mcp_server.cache.clear()
 
         return jsonify({
             "status": "success",
@@ -403,6 +476,62 @@ def mcp_feedback():
         return jsonify({"status": "ok"}), 200
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)}), 500
+
+
+# ─── INDEX MANAGEMENT (web UI + CLI) ─────────────────────────────────────────
+@app.route("/api/sources", methods=["GET", "OPTIONS"])
+def list_sources():
+    """Every indexed domain with its page and code-block counts."""
+    if request.method == "OPTIONS":
+        return "", 204
+    store = get_sqlite_store()
+    stats = store.get_stats()
+    return jsonify({
+        "sources": store.list_sources(),
+        "total_docs": stats.get("total_docs", 0),
+        "total_code_blocks": stats.get("total_code_blocks", 0),
+    }), 200
+
+
+@app.route("/api/sources/<path:domain>", methods=["GET", "DELETE", "OPTIONS"])
+def source_detail(domain):
+    """GET the pages indexed for a domain; DELETE removes them all."""
+    if request.method == "OPTIONS":
+        return "", 204
+    store = get_sqlite_store()
+    if request.method == "DELETE":
+        removed = store.delete_domain_documents(domain)
+        mcp_server.cache.clear()
+        return jsonify({"status": "ok", "domain": domain, "removed": removed}), 200
+    return jsonify({"domain": domain, "docs": store.list_source_docs(domain)}), 200
+
+
+@app.route("/api/context", methods=["POST", "OPTIONS"])
+def context():
+    """Run get_context exactly as an MCP client would, for previewing answers.
+
+    Body: { "query": "..." }
+    """
+    if request.method == "OPTIONS":
+        return "", 204
+    data = request.get_json(silent=True) or {}
+    query = str(data.get("query", "")).strip()
+    if not query:
+        return jsonify({"status": "error", "error": "query is required"}), 400
+    return jsonify(mcp_server._tool_get_context({"query": query})), 200
+
+
+@app.route("/api/reset", methods=["POST", "OPTIONS"])
+def reset_index():
+    """Empty the whole index. Body must be { "confirm": true }."""
+    if request.method == "OPTIONS":
+        return "", 204
+    data = request.get_json(silent=True) or {}
+    if data.get("confirm") is not True:
+        return jsonify({"status": "error", "error": 'send {"confirm": true} to empty the index'}), 400
+    removed = get_sqlite_store().delete_all_documents()
+    mcp_server.cache.clear()
+    return jsonify({"status": "ok", "removed": removed}), 200
 
 
 # ─── SERVERLESS MCP: BACKGROUND SCRAPE ENDPOINT (NON-BLOCKING) ───────────────
@@ -548,4 +677,8 @@ def stats():
 if __name__ == "__main__":
     debug = os.getenv("FLASK_DEBUG", "False") == "True"
     port = int(os.getenv("FLASK_PORT", 8080))
-    app.run(debug=debug, host="0.0.0.0", port=port)
+    # The auto-reloader forks the process while torch/SBERT worker pools are
+    # live, which leaks semaphores and crashes the child (exit 245). Keep debug
+    # error pages but disable the reloader unless explicitly asked for.
+    use_reloader = os.getenv("FLASK_USE_RELOADER", "False") == "True"
+    app.run(debug=debug, host="0.0.0.0", port=port, use_reloader=use_reloader)

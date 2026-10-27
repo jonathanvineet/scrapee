@@ -21,15 +21,22 @@ from typing import Dict, List, Optional, Tuple
 SBERT_AVAILABLE = False
 SKLEARN_AVAILABLE = False
 
-try:
-    from sentence_transformers import SentenceTransformer
-    import numpy as np
-    SBERT_AVAILABLE = True
-    print("[VEC] sentence-transformers available — using semantic embeddings")
-except ImportError:
-    pass
+# Escape hatch: on some macOS/Python builds torch + another OpenMP runtime
+# segfault the process. Set SCRAPEE_DISABLE_VECTORS=1 (or =sbert) to skip the
+# heavy model and fall back to TF-IDF, or SCRAPEE_DISABLE_VECTORS=all to disable
+# semantic search entirely.
+_VEC_DISABLE = os.getenv("SCRAPEE_DISABLE_VECTORS", "").strip().lower()
 
-if not SBERT_AVAILABLE:
+if _VEC_DISABLE not in ("1", "sbert", "true", "yes", "all"):
+    try:
+        from sentence_transformers import SentenceTransformer
+        import numpy as np
+        SBERT_AVAILABLE = True
+        print("[VEC] sentence-transformers available — using semantic embeddings")
+    except ImportError:
+        pass
+
+if not SBERT_AVAILABLE and _VEC_DISABLE != "all":
     try:
         from sklearn.feature_extraction.text import TfidfVectorizer
         from sklearn.metrics.pairwise import cosine_similarity
@@ -55,6 +62,7 @@ class VectorStore:
     def __init__(self, conn: sqlite3.Connection):
         self.conn = conn
         self._lock = threading.Lock()
+        self._model_lock = threading.Lock()  # guards first SBERT model load only
 
         # In-memory caches
         self._doc_ids: List[int] = []
@@ -183,9 +191,18 @@ class VectorStore:
         self._tfidf_matrix = self._tfidf.fit_transform(self._doc_texts)
 
     def _get_model(self):
+        # Serialise first load: two threads constructing SentenceTransformer /
+        # spinning up torch at once is a known segfault path.
         if self._model is None:
-            print(f"[VEC] Loading SBERT model: {self.SBERT_MODEL}")
-            self._model = SentenceTransformer(self.SBERT_MODEL)
+            with self._model_lock:
+                if self._model is None:
+                    print(f"[VEC] Loading SBERT model: {self.SBERT_MODEL}")
+                    try:
+                        import torch
+                        torch.set_num_threads(1)
+                    except Exception:
+                        pass
+                    self._model = SentenceTransformer(self.SBERT_MODEL)
         return self._model
 
     # ──────────────────────────────────────────

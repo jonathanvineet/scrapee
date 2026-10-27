@@ -54,44 +54,6 @@ def is_useful_content(content: str) -> bool:
 
 
 
-    """🚀 CRITICAL: Classify page type to select optimal parser.
-    
-    Returns: "github" | "config" | "wikipedia" | "docs" | "article" | "thin" | "generic"
-    """
-    url = url.lower()
-    html = html.lower() if html else ""
-
-    # GitHub (special structure)
-    if "github.com" in url:
-        return "github"
-
-    # Config files (XML, JSON, YAML)
-    if url.endswith((".xml", ".json", ".yaml", ".yml", ".conf", ".toml")):
-        return "config"
-
-    # Wikipedia (semi-structured)
-    if "wikipedia.org" in url:
-        return "wikipedia"
-
-    # Documentation sites (look for code + tables)
-    if "<pre" in html and "<code" in html:
-        return "docs"
-    if "<table" in html and ("<code" in html or "<h" in html):
-        return "docs"
-
-    # Article / blog (has article tag or main tag)
-    if "<article" in html or "<main" in html:
-        return "article"
-
-    # Too thin (probably error page)
-    if len(html) < 500:
-        return "thin"
-
-    # Fallback
-    return "generic"
-
-
-
 # Override via env var SCRAPEE_ALLOWED_DOMAINS (comma-separated, empty = allow all public).
 _ALLOWED_DOMAINS_ENV = ""
 try:
@@ -122,6 +84,58 @@ BLOCKED_SUFFIXES: Tuple[str, ...] = (".local", ".internal", ".corp", ".home")
 
 # Maximum seconds to wait for a single HTTP request.
 FETCH_TIMEOUT_SECONDS: int = 8
+
+_CONFIG_EXTENSIONS: Tuple[str, ...] = (
+    ".yml", ".yaml", ".toml", ".ini", ".cfg", ".conf", ".env",
+    ".properties", ".lock",
+)
+_DOCS_HINTS: Tuple[str, ...] = (
+    "/docs/", "/doc/", "/documentation/", "/reference/", "/api/",
+    "/guide", "/manual/", "/handbook/", "/learn/", "/tutorial",
+    "readthedocs", "/latest/", "/stable/",
+)
+
+
+def detect_page_type(url: str, html: str) -> str:
+    """Classify a fetched page so ``parse_html`` can pick a specialised parser.
+
+    Returns one of: ``github``, ``config``, ``wikipedia``, ``docs``,
+    ``article``, ``thin``, ``generic``. Never raises — an unknown page falls
+    back to ``generic``.
+    """
+    try:
+        u = (url or "").lower()
+        host = urlparse(u).netloc
+        path = urlparse(u).path
+
+        if "github.com" in host or "raw.githubusercontent.com" in host or "gist.github.com" in host:
+            return "github"
+        if "wikipedia.org" in host or "wikimedia.org" in host:
+            return "wikipedia"
+        if path.endswith(_CONFIG_EXTENSIONS):
+            return "config"
+
+        text = ""
+        markup = html or ""
+        if markup:
+            try:
+                text = BeautifulSoup(markup, "html.parser").get_text(" ", strip=True)
+            except Exception:
+                text = re.sub(r"<[^>]+>", " ", markup)
+        # Very little readable text behind a lot (or a little) of markup.
+        if len(text) < 500:
+            return "thin"
+
+        lowered_markup = markup.lower()
+        if host.startswith("docs.") or any(hint in u for hint in _DOCS_HINTS):
+            return "docs"
+        if "<article" in lowered_markup or 'property="og:type" content="article"' in lowered_markup:
+            return "article"
+        if any(seg in path for seg in ("/blog/", "/post/", "/posts/", "/articles/", "/news/")):
+            return "article"
+        return "generic"
+    except Exception:
+        return "generic"
 
 
 class SmartScraper:
@@ -489,20 +503,23 @@ class SmartScraper:
         print(f"[Parser] {page_type.upper()} detected for {url}")
         
         # Step 2: Route to specialized parser
-        if page_type == "github":
-            return self._parse_github(html, url)
-        elif page_type == "config":
-            return self._parse_config(html, url)
-        elif page_type == "wikipedia":
-            return self._parse_wikipedia(html, url)
-        elif page_type == "docs":
-            return self._parse_docs(html, url)
-        elif page_type == "article":
-            return self._parse_article(html, url)
-        elif page_type == "thin":
-            return self._parse_thin(html, url)
-        else:
-            return self._parse_generic(html, url)
+        parsers = {
+            "github": self._parse_github,
+            "config": self._parse_config,
+            "wikipedia": self._parse_wikipedia,
+            "docs": self._parse_docs,
+            "article": self._parse_article,
+            "thin": self._parse_thin,
+        }
+        parsed = parsers.get(page_type, self._parse_generic)(html, url)
+
+        # Specialised parsers label the page by type ("Documentation"); give it
+        # the page's own title whenever the markup has one.
+        if page_type not in ("github", "config") and "<" in (html or ""):
+            real = self._extract_metadata(BeautifulSoup(html, "html.parser"), url).get("title")
+            if real:
+                parsed.setdefault("metadata", {})["title"] = real
+        return parsed
 
     def _parse_github(self, html: str, url: str) -> Dict:
         """Parse GitHub files (code/markdown/config)."""
@@ -558,23 +575,31 @@ class SmartScraper:
         for tag in soup(["script", "style", "nav", "footer", "header"]):
             tag.decompose()
         
-        # Extract code blocks
+        # Extract code blocks: whole <pre> blocks (not each nested <code>),
+        # with the language from a "language-xxx" / "lang-xxx" class.
         code_blocks = []
-        for tag in soup.find_all(["pre", "code"]):
-            snippet = tag.get_text()
-            if len(snippet) > 10:
-                code_blocks.append({
-                    "snippet": snippet[:5000],
-                    "language": "",
-                    "context": ""
-                })
-        
+        for pre in soup.find_all("pre"):
+            snippet = pre.get_text()
+            if len(snippet.strip()) <= 10:
+                continue
+            classes = " ".join(pre.get("class", []))
+            inner = pre.find("code")
+            if inner:
+                classes += " " + " ".join(inner.get("class", []))
+            lang = re.search(r"(?:language|lang)-([\w+#-]+)", classes)
+            heading = pre.find_previous(["h1", "h2", "h3"])
+            code_blocks.append({
+                "snippet": snippet[:5000],
+                "language": lang.group(1).lower() if lang else "",
+                "context": heading.get_text(" ", strip=True)[:200] if heading else "",
+            })
+
         # Extract text
         text = soup.get_text(" ", strip=True)
-        
+
         return {
             "content": text[:100000],
-            "code_blocks": code_blocks[:5],
+            "code_blocks": code_blocks[:30],
             "topics": [],
             "metadata": {"title": "Documentation", "type": "docs"}
         }

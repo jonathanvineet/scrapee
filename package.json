@@ -4,8 +4,10 @@
   "description": "Full-stack web scraper application",
   "scripts": {
     "dev": "concurrently --names \"BACKEND,FRONTEND\" --prefix \"[{name}]\" \"npm run dev:backend\" \"npm run dev:frontend\"",
-    "dev:backend": "cd backend && source venv/bin/activate && FLASK_ENV=development FLASK_DEBUG=True FLASK_PORT=8080 python3 app.py",
+    "dev:backend": "cd backend && source venv/bin/activate && FLASK_ENV=development FLASK_DEBUG=True FLASK_PORT=8080 SCRAPEE_DISABLE_VECTORS=1 python3 app.py",
+    "dev:backend:sbert": "cd backend && source venv/bin/activate && FLASK_ENV=development FLASK_DEBUG=True FLASK_PORT=8080 python3 app.py",
     "dev:frontend": "cd frontend && npm run dev",
+    "mcp": "cd backend && source venv/bin/activate && python3 mcp_stdio.py",
     "build": "npm --prefix frontend install && npm --prefix frontend run build",
     "start": "concurrently --names \"BACKEND,FRONTEND\" --prefix \"[{name}]\" \"npm run start:backend\" \"npm run start:frontend\"",
     "start:backend": "cd backend && source venv/bin/activate && FLASK_ENV=production python3 app.py",

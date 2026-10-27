@@ -1,107 +1,97 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import Image from 'next/image';
-import ScraperForm from '@/components/ScraperForm';
-import ResultsDisplay from '@/components/ResultsDisplay';
-import History from '@/components/History';
-import '@/styles/globals.css';
-import batmanLogo from '../batman_logo.png';
+import { useCallback, useEffect, useState } from 'react';
+import BatMark from '@/components/BatMark';
+import CrawlPanel from '@/components/CrawlPanel';
+import SourcesTable from '@/components/SourcesTable';
+import AskPanel from '@/components/AskPanel';
+import ConnectPanel from '@/components/ConnectPanel';
+import { API_BASE, MCP_URL, getHealth, getSources } from '@/lib/api';
+import { plural } from '@/lib/format';
 
 export default function Home() {
-  const [results, setResults] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState('scraper');
-  const [timestamp, setTimestamp] = useState('');
+  const [health, setHealth] = useState(null); // null = checking, false = offline
+  const [sources, setSources] = useState(null);
+  const [sourcesError, setSourcesError] = useState('');
 
-  useEffect(() => {
-    setInterval(() => {
-      setTimestamp(new Date().toISOString());
-    }, 1000);
+  const refresh = useCallback(async () => {
+    setSourcesError('');
+    try {
+      setHealth(await getHealth());
+    } catch {
+      setHealth(false);
+    }
+    try {
+      setSources(await getSources());
+    } catch {
+      // A backend that is still starting (or busy crawling) gets one more try.
+      await new Promise((r) => setTimeout(r, 1500));
+      try {
+        setSources(await getSources());
+      } catch (e) {
+        setSources(null);
+        setSourcesError(e.message);
+      }
+    }
   }, []);
 
-  const handleScrape = async (formData) => {
-    setLoading(true);
-    try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/scrape`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(formData),
-      });
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
 
-      if (!response.ok) {
-        throw new Error('SCRAPE_ERR_CONN_REFUSED');
-      }
-
-      const data = await response.json();
-      setResults(data);
-      setActiveTab('results');
-    } catch (error) {
-      setResults({
-        error: error.message || 'FATAL_EXCEPTION_DURING_EXECUTION',
-      });
-    } finally {
-      setTimeout(() => setLoading(false), 500);
-    }
-  };
+  const offline = health === false;
+  const total = sources?.total_docs ?? 0;
+  const sites = sources?.sources?.length ?? 0;
 
   return (
-    <div className="container">
-      <header>
+    <div className="shell">
+      <header className="topbar">
         <div className="brand">
-          <Image
-            src={batmanLogo}
-            alt="Scrapee bat logo"
-            className="brand-logo"
-            priority
-          />
-          <h1>root@scrapee:~#</h1>
+          <BatMark size={30} />
+          <span className="brand-name">Scrapee</span>
         </div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--fg-muted)' }}>
-          <p>sys_ver: 2.4.0_beta</p>
-          <p>SYSTIME: {timestamp}</p>
+        <div className="endpoint" title="MCP endpoint your editor connects to">
+          <span className={`dot ${offline ? 'dot-off' : health ? 'dot-on' : ''}`} aria-hidden="true" />
+          <span className="sr-only">{offline ? 'Backend offline' : health ? 'Backend online' : 'Checking backend'}</span>
+          <span className="mono endpoint-url">{MCP_URL}</span>
         </div>
       </header>
 
-      <nav className="tabs">
-        <button
-          className={`tab ${activeTab === 'scraper' ? 'active' : ''}`}
-          onClick={() => setActiveTab('scraper')}
-        >
-          [ EXEC ]
-        </button>
-        <button
-          className={`tab ${activeTab === 'results' ? 'active' : ''}`}
-          onClick={() => setActiveTab('results')}
-        >
-          [ DUMP ]
-        </button>
-        <button
-          className={`tab ${activeTab === 'history' ? 'active' : ''}`}
-          onClick={() => setActiveTab('history')}
-        >
-          [ LOGS ]
-        </button>
-      </nav>
+      <main className="canvas">
+        <div className="title-row">
+          <h1>Your docs index</h1>
+          <p className="subline">
+            {offline ? (
+              <>
+                The backend at <span className="mono">{API_BASE}</span> isn’t answering. Start it with{' '}
+                <code>npm run dev:backend</code>, then{' '}
+                <button type="button" className="link" onClick={refresh}>
+                  check again
+                </button>
+                .
+              </>
+            ) : sources ? (
+              total > 0 ? (
+                `${plural(total, 'page')} from ${plural(sites, 'site')}, served to your AI client over MCP.`
+              ) : (
+                'Crawl a docs site and your AI client answers from its real, current pages.'
+              )
+            ) : (
+              'Checking the index…'
+            )}
+          </p>
+        </div>
 
-      <main className="main" style={{ flex: 1, overflowY: 'auto' }}>
-        {activeTab === 'scraper' && (
-          <ScraperForm onSubmit={handleScrape} loading={loading} />
-        )}
-        {activeTab === 'results' && (
-          <ResultsDisplay results={results} />
-        )}
-        {activeTab === 'history' && (
-          <History />
-        )}
+        <CrawlPanel onIndexed={refresh} suggest={sources && total === 0} />
+
+        <div className="work">
+          <SourcesTable data={sources} error={sourcesError} onRetry={refresh} onChanged={refresh} />
+          <div className="rail">
+            <AskPanel disabled={offline || total === 0} />
+            <ConnectPanel />
+          </div>
+        </div>
       </main>
-
-      <footer style={{ marginTop: 'auto', borderTop: '1px dashed var(--fg-muted)', paddingTop: '1rem', color: 'var(--fg-muted)', fontSize: '0.8rem', display: 'flex', justifyContent: 'space-between' }}>
-        <span>CONNECTION: SECURE</span>
-        <span>ENCRYPTION: AES-256</span>
-      </footer>
     </div>
   );
 }

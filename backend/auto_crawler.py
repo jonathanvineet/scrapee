@@ -13,6 +13,7 @@ The crawler is careful to NOT overload servers:
   - 30 minute sleep between full cycles
   - Respects per-domain crawl budgets
 """
+import os
 import threading
 import time
 from datetime import datetime, timedelta
@@ -164,7 +165,9 @@ class AutoCrawler:
                 pages_scraped += self._crawl_url(url, depth=0)
 
         # ── Phase 4: Evergreen seed refresh (if budget remains) ──
-        if pages_scraped < MAX_PAGES_PER_CYCLE // 2:
+        # Opt-in like the engine's startup bootstrap: otherwise sites the user
+        # never asked for appear in their index, and an emptied index refills.
+        if os.getenv("SCRAPEE_BOOTSTRAP_DOCS") == "1" and pages_scraped < MAX_PAGES_PER_CYCLE // 2:
             for seed in EVERGREEN_SEEDS:
                 if self._stop_event.is_set():
                     break
